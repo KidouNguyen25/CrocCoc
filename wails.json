@@ -1,0 +1,15 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "CrocCoc",
+  "outputfilename": "CrocCoc",
+  "frontend:install": "npm ci",
+  "frontend:build": "npm run build",
+  "frontend:dev:watcher": "npm run dev",
+  "frontend:dev:serverUrl": "auto",
+  "info": {
+    "companyName": "CrocCoc",
+    "productName": "CrocCoc",
+    "productVersion": "0.1.0",
+    "comments": "Desktop interface for Croc"
+  }
+}
