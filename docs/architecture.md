@@ -1,46 +1,77 @@
 # AD — Mô tả kiến trúc CrocCoc
 
-| ID | Phiên bản | Trạng thái | Phạm vi |
+| Mã | Phiên bản | Ngày | Trạng thái | Mã nguồn đối chiếu |
+| --- | --- | --- | --- | --- |
+| CC-AD-001 | 0.2 | 2026-11-19 | Dự thảo để duyệt | `610b622` |
+
+Cấu trúc tài liệu tham chiếu [ISO/IEC/IEEE 42010:2022](https://www.iso.org/standard/74393.html). Đối tượng mô tả là ứng dụng desktop CrocCoc. Người dùng chạy một gói desktop, còn frontend và backend tách mã nguồn, trách nhiệm và kiểm thử. Croc CLI, WebView2 và mạng là các phụ thuộc ngoài.
+
+## 1. Bên liên quan, mối quan tâm và góc nhìn
+
+| Góc nhìn | Bên liên quan | Câu hỏi cần trả lời | Mô hình dùng trong tài liệu |
 | --- | --- | --- | --- |
-| CC-AD-001 | 0.1 | Kiến trúc khởi tạo | Ứng dụng desktop CrocCoc trên Windows x64 |
+| VP-01 Cấu trúc | Frontend, backend, reviewer | Lớp nào sở hữu logic và lớp nào chuyển lời gọi? | Bảng thành phần và hướng phụ thuộc. |
+| VP-02 Vận hành | Người gửi, người nhận, backend, QA | Một phiên đi qua các lớp nào, ai xử lý lỗi và hủy? | Luồng theo chế độ, quy tắc trạng thái từ ICD. |
+| VP-03 Triển khai | Tích hợp, QA, người dùng desktop | Gói nào chạy trên Windows, cần gì và có gọi mạng không? | Bảng node triển khai và ranh giới tin cậy. |
 
-Tài liệu vận dụng [ISO/IEC/IEEE 42010:2022](https://www.iso.org/standard/74393.html) để ghi rõ bên liên quan, mối quan tâm, góc nhìn, quan hệ giữa các góc nhìn và lý do thiết kế. Đây là hồ sơ nội bộ, không phải tuyên bố chứng nhận tuân thủ.
+## 2. VP-01 — Cấu trúc và sở hữu
 
-## Bên liên quan và góc nhìn
-
-| Bên liên quan | Mối quan tâm | Góc nhìn |
+| ID | Thành phần | Trách nhiệm và phụ thuộc |
 | --- | --- | --- |
-| Người gửi, người nhận | Mã kết nối, trạng thái, nơi lưu, lỗi và hủy | Cấu trúc, luồng chạy |
-| Toàn, frontend và review | Phát triển UI độc lập, không phụ thuộc Croc hay Go để chạy mock | Cấu trúc |
-| Phát, backend | Lệnh CLI an toàn, xử lý lỗi và vòng đời tiến trình | Cấu trúc, luồng chạy |
-| Minh, tích hợp và QA | Nhúng asset, WebView2, phiên bản CLI, build Windows và tái lập test | Triển khai |
+| FE | [React UI](../frontend/src/App.tsx) | Hiển thị chế độ, trạng thái và thao tác. Dùng `TransferClient` làm biên gọi, không điều phối tiến trình Croc. |
+| FE-MOCK | [Mock TypeScript](../frontend/src/mockTransfer.ts) | Lịch event có thể hủy, mã mẫu, không đọc hoặc ghi tệp. Dùng cho trình duyệt và nút mô phỏng trong desktop init. |
+| FE-IPC | [Adapter Wails](../frontend/src/adapters/wailsTransfer.ts) | Ánh xạ lời gọi và event sang `TransferClient`. Không quyết định quy tắc hủy hay chuẩn hóa dữ liệu nghiệp vụ. |
+| HOST | [Wails host](../main.go) và [bridge](../app.go) | Nhúng bundle frontend, bind `main.App` và chuyển lời gọi vào `transfer.Service`. Không sở hữu tiến trình truyền. |
+| BE | [Backend Go](../backend/transfer/) | Sở hữu kiểu dữ liệu và hành vi truyền. Không import Wails. Hiện bind một dịch vụ báo chưa tích hợp. |
+| CLI | Croc CLI | Phụ thuộc ngoài do backend mục tiêu khởi chạy và theo dõi. Bản init không chạy binary này. |
 
-## Góc nhìn cấu trúc
+Hướng phụ thuộc khi tích hợp là frontend → adapter → Wails bridge → backend. Điều khiển trạng thái phải thuộc backend. Wails chuyển tiếp event, còn UI trình bày trạng thái. Frontend có thể thay implementation `TransferClient` bằng mock mà không cần Go.
 
-| Thành phần | Mã nguồn | Phụ thuộc và trách nhiệm |
+## 3. VP-02 — Luồng chạy và trạng thái
+
+| Chế độ | Đường đi | Kết quả xác định |
 | --- | --- | --- |
-| FE — Web UI | `frontend/src/` | React hiển thị trạng thái. Gọi qua `TransferClient`; mock chạy không cần runtime desktop. |
-| FE-IPC — Adapter TypeScript | `frontend/src/adapters/wailsTransfer.ts` | Ánh xạ `TransferClient` vào Wails IPC và chuyển event. Không giữ trạng thái nghiệp vụ. |
-| HOST — Desktop host và bridge | `main.go`, `app.go`, `wails.json` | Khởi động Wails, nhúng `frontend/dist/`, nối binding `main.App` với `transfer.Service`. Không điều phối truyền tệp. |
-| BE — Dịch vụ Go | `backend/transfer/` | Sở hữu contract và hành vi truyền tệp. Không import Wails hay giao diện. Hiện dùng dịch vụ trả trạng thái chưa tích hợp. |
-| CLI — Tiến trình Croc | Ngoài repo | Dự kiến chạy từ backend qua runner CC-02/03. Không có kết nối CLI ở bản khởi tạo. |
+| Trình duyệt init | FE → FE-MOCK → FE | Gửi, nhận và hủy bằng lịch mẫu. Không dùng mạng để truyền tệp. |
+| Desktop init, kiểm tra Croc | FE → FE-IPC → HOST → BE | Hiển thị trạng thái chưa tích hợp. Bấm nút mô phỏng vẫn dùng FE-MOCK. |
+| Desktop mục tiêu | FE → FE-IPC → HOST → BE → CLI | Backend kiểm tra đầu vào và khả dụng, nhận hoặc từ chối phiên, theo dõi Croc. Event đi ngược qua HOST và FE-IPC. |
 
-## Góc nhìn luồng chạy
+```mermaid
+sequenceDiagram
+    participant UI as WebView và adapter
+    participant Host as Wails bridge
+    participant BE as Go service
+    participant CLI as Croc CLI
+    UI->>Host: Bắt đầu phiên
+    Host->>BE: Gọi dịch vụ truyền tệp
+    BE->>CLI: Khởi chạy khi hợp lệ
+    BE-->>Host: ID phiên
+    Host-->>UI: ID phiên
+    CLI-->>BE: Trạng thái chạy
+    BE-->>Host: Cập nhật phiên
+    Host-->>UI: transfer:update
+```
 
-- Bản xem thử hiện tại dùng **FE → mock** để phát các trạng thái mẫu. Trên desktop, FE chỉ gọi trạng thái khả dụng qua **FE-IPC → HOST → BE**. Backend không phát event phiên thật ở bản này.
-- Luồng mục tiêu dùng **FE → FE-IPC → HOST → BE → CLI**. Backend sở hữu vòng đời, chuyển cập nhật qua HOST thành event `transfer:update` cho FE-IPC và bảo đảm mỗi phiên chỉ có một kết quả cuối. Tên phương thức, trường dữ liệu và event được ghi trong [ICD](transfer-contract.md).
-- Ranh giới bí mật nằm giữa phần nhập/hiển thị mã ở FE, IPC nội bộ và tiến trình Croc. Mã không đi qua log hay lưu trữ lâu dài. Backend không gọi shell với dữ liệu người dùng.
+Sơ đồ minh họa đường thành công **mục tiêu**. Thứ tự event đầu tiên so với Promise chưa được xác nhận. Quy tắc ID, vòng đời và cửa sổ hủy nằm trong [ICD](transfer-contract.md), không suy ra từ thứ tự minh họa. Khi hủy hoặc thoát, backend mục tiêu chịu trách nhiệm đóng tài nguyên runner. Khi thất bại, không trả lỗi thô của tiến trình lên UI.
 
-## Góc nhìn triển khai
+## 4. VP-03 — Triển khai và dữ liệu
 
-Frontend build thành tài nguyên tĩnh và được nhúng vào `CrocCoc.exe`. Tiến trình ứng dụng chạy Wails và dịch vụ Go, còn WebView2 hiển thị giao diện. Khi tích hợp thật, Croc chạy ở tiến trình con do backend quản lý và phụ trách kết nối mạng. Không có HTTP API server, cơ sở dữ liệu hoặc dịch vụ relay riêng của CrocCoc. Bản phát triển Vite có thể chạy độc lập trên trình duyệt với mock.
+| Node | Tài nguyên | Ranh giới |
+| --- | --- | --- |
+| Máy phát triển | Node/Vite, Go, Wails CLI | Có thể chạy riêng mô phỏng frontend. Build Windows cần bundle trước khi Go nhúng tài nguyên. |
+| Máy người dùng | EXE Wails x64 và WebView2 | Giao diện và dịch vụ Go nằm trong cùng ứng dụng desktop, không cần dịch vụ HTTP backend riêng. |
+| Tiến trình con mục tiêu | Binary Croc đã khóa | Backend khởi chạy không qua shell. Croc xử lý kết nối tới peer hoặc relay. Chưa có ở init. |
+| Mạng | Peer và relay nếu cần | Ngoài phạm vi điều khiển của UI. Không có dịch vụ relay tự quản trong phạm vi bản đầu. |
 
-## Quyết định và tính nhất quán
+Đường dẫn, thư mục đích và mã kết nối là dữ liệu cục bộ nhạy cảm. Chỉ chuyển trường cần thiết qua IPC và runner. Không đưa mã vào log, lịch sử hay gói bằng chứng. Thư mục đích có quyền ghi và hành vi khi trùng tệp cần kiểm thử trước khi phân phối.
+
+## 5. Quyết định và đối chiếu giữa các góc nhìn
 
 | Mã | Quyết định | Lý do và hệ quả |
 | --- | --- | --- |
-| ADR-01 | Wails IPC, không dựng HTTP backend. | Mục tiêu là desktop cục bộ. Một gói ứng dụng đơn giản hơn, nhưng tích hợp phụ thuộc WebView2 và lifecycle Wails. |
-| ADR-02 | Giữ binding `main.App`, tiêm `transfer.Service` vào bridge. | Không đổi giao diện Wails khi di chuyển logic. Backend chạy test độc lập, bridge test forwarding và adapter test ánh xạ hợp đồng. |
-| ADR-03 | Dùng Croc CLI thay vì viết lại giao thức. | Giảm phạm vi. CC-02/03 phải khóa binary, quản lý vòng đời và kiểm tra các trường hợp lỗi của CLI. |
+| ADR-01 | Giữ Wails IPC thay cho HTTP backend riêng. | Một ứng dụng cục bộ đơn giản hơn, nhưng cần WebView2 và kiểm thử binding native. |
+| ADR-02 | Giữ `main.App` là bridge và tiêm `transfer.Service`. | Có thể test đơn vị backend không cần Wails. Contract vẫn phải đồng bộ hai ngôn ngữ. |
+| ADR-03 | Tích hợp Croc CLI thay vì viết giao thức riêng. | Tận dụng CLI, đổi lại phải khóa phiên bản, quản lý tiến trình và xác minh trên Windows. |
 
-Mô hình cấu trúc FE-IPC/HOST áp dụng đúng mapping trong ICD và được kiểm bởi `CC-T-02`. BE chạy độc lập theo `CC-T-01`; HOST nhúng artifact của FE theo `CC-T-03`. Phạm vi bản đầu và các ca chưa chạy nằm trong [hồ sơ kiểm thử](verification.md).
+VP-01 định nghĩa ranh giới FE-IPC/HOST mà VP-02 sử dụng. Mapping được ghi trong [đặc tả API](transfer-contract.md) và kiểm ở CC-T-02. VP-03 giải thích cách HOST đóng gói bundle FE, được kiểm ở CC-T-03 và CC-T-16. CLI chỉ xuất hiện như phụ thuộc mục tiêu ở VP-01, VP-02 và VP-03. Không dùng ba góc nhìn đó để khẳng định Croc đã cài hoặc truyền thành công.
+
+Rủi ro còn mở gồm cuộc đua giữa hủy và hoàn tất, đọc thiếu tiến độ từ Croc, dọn tiến trình con và khác biệt WebView2 giữa các máy. [Kế hoạch xác minh](verification.md) ghi các ca hồi quy và [thủ tục phát hành](release.md) ghi bằng chứng cần có trước bàn giao.

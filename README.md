@@ -11,7 +11,7 @@ Giao diện React có hai luồng Gửi và Nhận để xem thử bằng dữ l
 | Frontend | [`frontend/`](frontend) — React, TypeScript, Vite, mock và adapter Wails |
 | Backend | [`backend/transfer/`](backend/transfer) — dịch vụ, kiểu dữ liệu và kiểm thử Go, không import Wails |
 | Desktop host | `main.go`, `app.go`, `wails.json` — nhúng asset và nối UI với dịch vụ qua Wails IPC |
-| Hồ sơ kỹ thuật | [Yêu cầu](docs/requirements.md), [kiến trúc](docs/architecture.md), [ICD](docs/transfer-contract.md), [kiểm thử và truy vết](docs/verification.md) |
+| Hồ sơ kỹ thuật | [Danh mục tài liệu](docs/README.md), [đặc tả yêu cầu](docs/requirements.md), [đặc tả API Wails IPC](docs/transfer-contract.md), [kiến trúc](docs/architecture.md), [kiểm thử](docs/verification.md), [ma trận truy vết](docs/traceability.md), [cấu hình](docs/configuration-management.md), [phát hành](docs/release.md) |
 
 CrocCoc là ứng dụng desktop. Frontend và backend có ranh giới mã nguồn và kiểm thử riêng, không cần triển khai một API server.
 
