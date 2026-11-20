@@ -82,7 +82,8 @@ func openChildDirectory(parent windows.Handle, name string, parentVolume uint32)
 	var handle windows.Handle
 	var iosb windows.IO_STATUS_BLOCK
 	err = windows.NtCreateFile(&handle,
-		windows.FILE_READ_ATTRIBUTES|windows.FILE_LIST_DIRECTORY|windows.SYNCHRONIZE,
+		windows.FILE_READ_ATTRIBUTES|windows.FILE_LIST_DIRECTORY|
+			ntFileAddFile|ntFileAddSubdirectory|windows.SYNCHRONIZE,
 		&attributes, &iosb, nil, 0,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
 		windows.FILE_OPEN,

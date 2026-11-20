@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"sync"
 	"time"
 	"unsafe"
 
@@ -39,6 +41,9 @@ type ReceiveStage struct {
 	payload     windows.Handle
 	journalPath string
 	ownership   StageOwnership
+	mu          sync.Mutex
+	allowed     map[string]ManifestEntry
+	prepared    bool
 }
 
 func (s *ReceiveStage) Ownership() StageOwnership {
@@ -55,6 +60,8 @@ func (s *ReceiveStage) Close() error {
 	if s == nil {
 		return nil
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	var failed bool
 	if s.payload != 0 {
 		failed = windows.CloseHandle(s.payload) != nil
@@ -106,7 +113,12 @@ func prepareReceiveStageAt(lease *DestinationLease, entries []ManifestEntry, jou
 	}
 	defer windows.CloseHandle(root)
 
-	stage := &ReceiveStage{}
+	allowed := make(map[string]ManifestEntry, len(entries))
+	for _, entry := range entries {
+		entry.Path = strings.ReplaceAll(entry.Path, "\\", "/")
+		allowed[strings.ToUpper(entry.Path)] = entry
+	}
+	stage := &ReceiveStage{allowed: allowed}
 	defer func() {
 		if err != nil {
 			_ = stage.Close()
