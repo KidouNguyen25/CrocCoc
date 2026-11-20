@@ -67,3 +67,14 @@ func TestValidateManifestEnforcesQuota(t *testing.T) {
 		t.Fatalf("entry quota: got %v", err)
 	}
 }
+
+func TestSafeWindowsComponentOnlyAcceptsSingleName(t *testing.T) {
+	for _, name := range []string{"parent/leaf", "parent\\leaf", "leaf/", "leaf\\", string([]byte{0xff})} {
+		if safeWindowsComponent(name) {
+			t.Errorf("accepted invalid component %q", name)
+		}
+	}
+	if !safeWindowsComponent("ảnh 2.png") {
+		t.Error("rejected ordinary Unicode component")
+	}
+}

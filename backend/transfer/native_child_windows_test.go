@@ -47,7 +47,7 @@ func TestNativeChildDirectoryAnchoredCreateAndExclusiveCollision(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(base, name)); err != nil {
 		t.Fatal(err)
 	}
-	for _, invalid := range []string{"..", "x/y", "CON", "a:stream"} {
+	for _, invalid := range []string{"..", "x/y", name + "\\inner", "CON", "a:stream"} {
 		if h, _, err := createChildDirectory(parent, invalid); err == nil {
 			_ = windows.CloseHandle(h)
 			t.Fatalf("unsafe child created: %q", invalid)

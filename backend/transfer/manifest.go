@@ -94,12 +94,12 @@ func safeRelativePath(path string) ([]string, bool) {
 }
 
 func safeWindowsComponent(part string) bool {
-	if part == "" || part == "." || part == ".." ||
+	if part == "" || part == "." || part == ".." || !utf8.ValidString(part) ||
 		strings.HasSuffix(part, ".") || strings.HasSuffix(part, " ") {
 		return false
 	}
 	for _, r := range part {
-		if r < 0x20 || r == 0x7f || strings.ContainsRune("<>:\"|?*", r) ||
+		if r < 0x20 || r == 0x7f || strings.ContainsRune("<>:\"|?*/\\", r) ||
 			r == 0x061c || r == 0x200e || r == 0x200f ||
 			(r >= 0x202a && r <= 0x202e) ||
 			(r >= 0x2066 && r <= 0x2069) {
