@@ -21,4 +21,15 @@ croc-manifest-probe.test.exe -test.run TestCrocCocManifestOnly -test.v -test.tim
 
 Đã chạy PE x64 trên máy phát triển Windows. Bộ test kiểm frame legacy và chunked đã mã hóa, callback chỉ nhận danh sách đầy đủ, hủy hoặc từ chối, và luồng gửi/nhận qua relay TCP loopback. Ca loopback quan sát được metadata của một tệp, sender không vào trạng thái yêu cầu payload và thư mục nhận vẫn rỗng.
 
-Spike này chưa cấp phép tải sau đồng ý, chưa nối bộ chiếu manifest hoặc staging vào client Croc, chưa chuyển secret qua pipe riêng và chưa xác minh hai máy Windows. Hook đang nhận `SenderInfo` thô trong engine. Adapter phải bỏ tuyệt đối trường nguồn, ID máy hay địa chỉ peer và chỉ đưa trường cho phép qua ranh giới tiến trình. Giới hạn giải mã trước hook vẫn là của Croc, chưa phải ngân sách MVP. Host giữ `NOT_INTEGRATED`.
+## Worker loopback
+
+Module `worker/` nối callback Croc với bộ chiếu manifest của backend. Module thay thế nguồn Croc bằng checkout đã vá ở `.tmp/croc-engine-spike`. Từ `worker/`, build hoặc test với bản chỉ relay, không có Tailcat.
+
+```text
+go build -tags croc_no_tailcat .
+go test -tags croc_no_tailcat -run TestWorkerLoopbackProjectsManifestAcrossPipes -v .
+```
+
+Worker nhận đúng một frame JSON có phiên bản từ stdin riêng, giới hạn 8 KiB và đợi EOF. Worker chỉ chấp nhận relay loopback dạng địa chỉ IP, tắt đường local discovery và không lấy mã từ argv hoặc env. Stdout dành cho đúng một kết quả có kiểu. `manifest_only` nghĩa là metadata hợp lệ và phiên đã dừng trước payload. Worker không chuyển source path, ID máy hoặc địa chỉ peer sang tiến trình gọi. Test Windows chạy sender qua relay TCP loopback và worker trong tiến trình con, kiểm danh sách Unicode và thư mục rỗng, không có mã hoặc mật khẩu trong kết quả và không có mục mới trong thư mục nhận.
+
+Spike chưa giữ phiên chờ đồng ý, cấp phép tải, nối Croc vào staging, hoặc chạy trên hai máy Windows. Giới hạn giải mã upstream trước hook vẫn chưa phải ngân sách MVP. Đây không phải kênh production hay bằng chứng nghiệm thu relay công cộng. Host giữ `NOT_INTEGRATED`.
