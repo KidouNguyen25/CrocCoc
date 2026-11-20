@@ -4,7 +4,6 @@ package transfer
 
 import (
 	"context"
-	"errors"
 	"io"
 	"os"
 	"runtime"
@@ -13,8 +12,6 @@ import (
 
 	"golang.org/x/sys/windows"
 )
-
-var ErrPayloadMismatch = errors.New("TRANSFER_FAILED: nội dung không khớp manifest")
 
 // createChildPayloadFile creates exactly one new ordinary file relative to a
 // native directory handle. FILE_CREATE never opens an existing file. It
@@ -183,18 +180,8 @@ func (s *ReceiveStage) writeStageFile(ctx context.Context, entry ManifestEntry, 
 	if err := ctx.Err(); err != nil {
 		return ErrPayloadMismatch
 	}
-	// An extra byte is read to distinguish a stream exceeding its declaration
-	// from one that matches it exactly. Payload boundaries belong to the
-	// framing transport; callers must supply one bounded file reader here.
-	written, err := io.CopyN(out, reader, entry.SizeBytes+1)
-	if err != nil && err != io.EOF {
-		return ErrPayloadMismatch
-	}
-	if written != entry.SizeBytes {
-		return ErrPayloadMismatch
-	}
-	if err := ctx.Err(); err != nil {
-		return ErrPayloadMismatch
+	if err := copyExactPayload(ctx, out, reader, entry.SizeBytes); err != nil {
+		return err
 	}
 	if err := out.Sync(); err != nil {
 		return ErrUnsafeStorage
