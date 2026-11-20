@@ -3,9 +3,12 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -20,21 +23,22 @@ import (
 	"github.com/schollz/croc/v11/src/tcp"
 )
 
-func TestStartRequestOnlyAcceptsOneBoundedLoopbackFrame(t *testing.T) {
+func TestStartRequestAcceptsOneBoundedLoopbackFrame(t *testing.T) {
 	valid := startRequest{Version: wireVersion, Code: "synthetic-code-fixture", RelayAddress: "127.0.0.1:2345", RelayPassword: "fixture"}
 	data, err := json.Marshal(valid)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, err := readRequest(bytes.NewReader(data)); err != nil || got != valid {
+	if got, err := readRequest(bufio.NewReaderSize(bytes.NewReader(append(data, '\n')), requestLimit)); err != nil || got != valid {
 		t.Fatal("valid request rejected")
 	}
 	for _, bad := range []string{
-		string(data) + "{}",
-		strings.Replace(string(data), "127.0.0.1", "localhost", 1),
-		strings.Replace(string(data), "127.0.0.1", "192.0.2.1", 1),
-		strings.Replace(string(data), "2345", "0", 1),
-		strings.Repeat(" ", requestLimit+1),
+		string(data),
+		string(data) + "{}\n",
+		strings.Replace(string(data), "127.0.0.1", "localhost", 1) + "\n",
+		strings.Replace(string(data), "127.0.0.1", "192.0.2.1", 1) + "\n",
+		strings.Replace(string(data), "2345", "0", 1) + "\n",
+		strings.Repeat(" ", requestLimit) + "\n",
 	} {
 		var result bytes.Buffer
 		if code := run(t.Context(), strings.NewReader(bad), &result); code == 0 {
@@ -58,7 +62,64 @@ func TestWorkerProcess(t *testing.T) {
 	main()
 }
 
-func TestWorkerLoopbackProjectsManifestAcrossPipes(t *testing.T) {
+func TestDecisionFramesFailClosed(t *testing.T) {
+	const id = "fixture"
+	for _, tc := range []struct {
+		name, frame string
+		want        error
+	}{
+		{"accept", `{"version":2,"offerID":"fixture","accept":true}` + "\n", nil},
+		{"reject", `{"version":2,"offerID":"fixture","accept":false}` + "\n", errOfferRejected},
+		{"missing decision", `{"version":2,"offerID":"fixture"}` + "\n", errInvalidDecision},
+		{"null decision", `{"version":2,"offerID":"fixture","accept":null}` + "\n", errInvalidDecision},
+		{"unknown property", `{"version":2,"offerID":"fixture","accept":true,"path":"other"}` + "\n", errInvalidDecision},
+		{"stale offer", `{"version":2,"offerID":"other","accept":true}` + "\n", errInvalidDecision},
+		{"old version", `{"version":1,"offerID":"fixture","accept":true}` + "\n", errInvalidDecision},
+		{"oversized", strings.Repeat(" ", requestLimit) + "\n", errInvalidDecision},
+		{"closed stdin", "", errInvalidDecision},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := waitDecision(t.Context(), bufio.NewReaderSize(strings.NewReader(tc.frame), requestLimit), id)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("decision = %v, want %v", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestDecisionTimeoutDoesNotWaitForPipeEOF(t *testing.T) {
+	in, out := io.Pipe()
+	defer in.Close()
+	defer out.Close()
+	ctx, cancel := context.WithTimeout(t.Context(), 75*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- waitDecision(ctx, bufio.NewReaderSize(in, requestLimit), "fixture") }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("decision = %v, want deadline", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("decision remained blocked on the pipe")
+	}
+}
+
+func TestWorkerLoopbackWaitsForDecisionWithoutStartingPayload(t *testing.T) {
+	for _, tc := range []struct {
+		name, status                  string
+		accept, wrongOffer, closePipe bool
+	}{
+		{name: "accepted", status: "accepted_no_payload", accept: true},
+		{name: "rejected", status: "rejected"},
+		{name: "stale offer", status: "invalid_decision", accept: true, wrongOffer: true},
+		{name: "pipe closed", status: "invalid_decision", closePipe: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) { testWorkerLoopback(t, tc.status, tc.accept, tc.wrongOffer, tc.closePipe) })
+	}
+}
+
+func testWorkerLoopback(t *testing.T, status string, accept, wrongOffer, closePipe bool) {
 	ctx, cancel := context.WithTimeout(t.Context(), 12*time.Second)
 	defer cancel()
 	listen := func() net.Listener {
@@ -122,37 +183,114 @@ func TestWorkerLoopbackProjectsManifestAcrossPipes(t *testing.T) {
 	cmd := exec.CommandContext(ctx, testExe, "-test.run", "^TestWorkerProcess$")
 	cmd.Dir = dest
 	cmd.Env = append(os.Environ(), "CROCCOC_TEST_WORKER=1", "LOGGER=trace")
-	frame, err := json.Marshal(request)
+	in, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd.Stdin = bytes.NewReader(frame)
-	output, err := cmd.Output()
+	out, err := cmd.StdoutPipe()
 	if err != nil {
-		status := "no structured status"
-		var reply manifestResult
-		if json.Unmarshal(output, &reply) == nil {
-			status = reply.Status
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal("start test worker")
+	}
+	var waited bool
+	t.Cleanup(func() {
+		if !waited {
+			cancel()
+			_ = cmd.Wait()
 		}
-		t.Fatalf("test worker failed: %v (%s)", err, status)
+	})
+	encoder := json.NewEncoder(in)
+	if err := encoder.Encode(request); err != nil {
+		t.Fatal("write worker start frame")
 	}
-	var result manifestResult
-	if err := json.Unmarshal(output, &result); err != nil {
-		t.Fatal("worker stdout was not one typed result")
+	reader := bufio.NewReader(out)
+	read := func() manifestResult {
+		t.Helper()
+		raw, err := reader.ReadBytes('\n')
+		var result manifestResult
+		if err != nil || json.Unmarshal(raw, &result) != nil || result.Version != wireVersion ||
+			bytes.Contains(raw, []byte(request.Code)) || bytes.Contains(raw, []byte(request.RelayPassword)) {
+			t.Fatal("worker did not return a typed frame without credentials")
+		}
+		return result
 	}
+	checkDestination := func() {
+		t.Helper()
+		items, err := os.ReadDir(dest)
+		if err != nil || len(items) != 0 {
+			t.Fatal("worker wrote to its destination")
+		}
+	}
+	result := read()
 	want := []transfer.ManifestEntry{
 		{Path: "Album", Directory: true},
 		{Path: "Album/Empty", Directory: true},
 		{Path: "Album/ảnh.txt", SizeBytes: 6},
 	}
-	if result.Version != wireVersion || result.Status != "manifest_only" || !reflect.DeepEqual(result.Entries, want) ||
-		bytes.Contains(output, []byte(request.Code)) || bytes.Contains(output, []byte(request.RelayPassword)) {
-		t.Fatal("worker did not return the projected fixture without credentials")
+	if result.Status != "awaiting_decision" || len(result.OfferID) != 32 || !reflect.DeepEqual(result.Entries, want) {
+		t.Fatalf("expected projected offer, got %q", result.Status)
 	}
-	items, err := os.ReadDir(dest)
-	if err != nil || len(items) != 0 {
-		t.Fatal("worker wrote to its destination")
+	// Keep the pipe open and withhold a decision. An early terminal frame
+	// must be caught before the client writes an accept or reject.
+	pending := make(chan manifestResult, 1)
+	readError := make(chan error, 1)
+	go func() {
+		raw, err := reader.ReadBytes('\n')
+		var final manifestResult
+		if err == nil {
+			err = json.Unmarshal(raw, &final)
+			if bytes.Contains(raw, []byte(request.Code)) || bytes.Contains(raw, []byte(request.RelayPassword)) {
+				err = errors.New("terminal frame leaked credentials")
+			}
+		}
+		if err != nil {
+			readError <- err
+			return
+		}
+		pending <- final
+	}()
+	select {
+	case early := <-pending:
+		t.Fatalf("worker finished before decision: %s", early.Status)
+	case err := <-readError:
+		t.Fatalf("worker output closed before decision: %v", err)
+	case <-time.After(100 * time.Millisecond):
 	}
+	checkDestination()
+	if closePipe {
+		if err := in.Close(); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		offerID := result.OfferID
+		if wrongOffer {
+			offerID = "not the current offer"
+		}
+		if err := encoder.Encode(decisionRequest{Version: wireVersion, OfferID: offerID, Accept: &accept}); err != nil {
+			t.Fatal("write worker decision")
+		}
+	}
+	select {
+	case final := <-pending:
+		if final.Version != wireVersion || final.Status != status || final.OfferID != "" || len(final.Entries) != 0 {
+			t.Fatalf("expected terminal %q, got %q", status, final.Status)
+		}
+	case err := <-readError:
+		t.Fatalf("missing terminal frame: %v", err)
+	case <-ctx.Done():
+		t.Fatal("worker did not respond to the decision")
+	}
+	if _, err := reader.ReadByte(); err != io.EOF {
+		t.Fatalf("expected EOF after terminal frame, got %v", err)
+	}
+	err = cmd.Wait()
+	waited = true
+	if (err == nil) != (status != "invalid_decision") {
+		t.Fatalf("unexpected worker exit for %q: %v", status, err)
+	}
+	checkDestination()
 	cancel()
 	select {
 	case sendErr := <-senderDone:

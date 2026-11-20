@@ -4,8 +4,11 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -22,9 +25,9 @@ import (
 )
 
 const (
-	wireVersion   = 1
+	wireVersion   = 2
 	requestLimit  = 8192
-	workerTimeout = 2 * time.Minute
+	workerTimeout = 3 * time.Minute
 )
 
 type startRequest struct {
@@ -37,24 +40,45 @@ type startRequest struct {
 type manifestResult struct {
 	Version int                      `json:"version"`
 	Status  string                   `json:"status"`
+	OfferID string                   `json:"offerID,omitempty"`
 	Entries []transfer.ManifestEntry `json:"entries,omitempty"`
 }
 
-var errInvalidRequest = errors.New("invalid worker request")
+type decisionRequest struct {
+	Version int    `json:"version"`
+	OfferID string `json:"offerID"`
+	Accept  *bool  `json:"accept"`
+}
 
-func readRequest(r io.Reader) (startRequest, error) {
-	data, err := io.ReadAll(io.LimitReader(r, requestLimit+1))
+var (
+	errInvalidRequest  = errors.New("invalid worker request")
+	errInvalidDecision = errors.New("invalid worker decision")
+	errOfferRejected   = errors.New("offer rejected")
+	errControlWrite    = errors.New("control stream write failed")
+)
+
+// readFrame reads exactly one bounded, newline-terminated JSON value. The
+// worker never waits for stdin EOF to start or to process a decision.
+func readFrame(r *bufio.Reader, dst any) error {
+	data, err := r.ReadSlice('\n')
 	if err != nil || len(data) > requestLimit {
-		return startRequest{}, errInvalidRequest
+		return errInvalidRequest
 	}
-	var request startRequest
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&request); err != nil {
-		return startRequest{}, errInvalidRequest
+	if err := decoder.Decode(dst); err != nil {
+		return errInvalidRequest
 	}
 	if err := decoder.Decode(new(json.RawMessage)); err != io.EOF {
-		return startRequest{}, errInvalidRequest
+		return errInvalidRequest
+	}
+	return nil
+}
+
+func readRequest(r *bufio.Reader) (startRequest, error) {
+	var request startRequest
+	if err := readFrame(r, &request); err != nil {
+		return startRequest{}, err
 	}
 	if request.Version != wireVersion ||
 		request.Code == "" || len(request.Code) > 128 || strings.ContainsAny(request.Code, "\r\n\x00") ||
@@ -78,7 +102,9 @@ func isLoopbackRelay(address string) bool {
 	return err == nil && p != 0
 }
 
-func captureManifest(ctx context.Context, request startRequest) ([]transfer.ManifestEntry, error) {
+// captureManifest holds the authenticated receive callback open while consume
+// handles the offer. The pinned Croc hook still stops before payload I/O.
+func captureManifest(ctx context.Context, request startRequest, consume func(context.Context, []transfer.ManifestEntry) error) error {
 	client, err := croc.NewCtx(ctx, croc.Options{
 		SharedSecret:     request.Code,
 		RelayAddress:     request.RelayAddress,
@@ -89,9 +115,8 @@ func captureManifest(ctx context.Context, request startRequest) ([]transfer.Mani
 		Curve:            "siec",
 	})
 	if err != nil {
-		return nil, err
+		return err
 	}
-	var manifest []transfer.ManifestEntry
 	err = client.ReceiveManifest(func(ctx context.Context, info croc.SenderInfo) error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -117,45 +142,97 @@ func captureManifest(ctx context.Context, request startRequest) ([]transfer.Mani
 			}
 			metadata.EmptyDirectories[i] = dir.FolderRemote
 		}
-		var err error
-		manifest, err = transfer.ProjectCrocReceiveManifest(metadata)
-		return err
+		manifest, err := transfer.ProjectCrocReceiveManifest(metadata)
+		if err != nil {
+			return err
+		}
+		return consume(ctx, manifest)
 	})
-	if errors.Is(err, croc.ErrManifestOnly) && len(manifest) > 0 {
-		return manifest, nil
+	return err
+}
+
+// waitDecision is the only reader for the second frame. If the deadline wins
+// against a blocked anonymous pipe read, run ends and main exits the process.
+func waitDecision(ctx context.Context, in *bufio.Reader, offerID string) error {
+	done := make(chan error, 1)
+	go func() {
+		var d decisionRequest
+		switch {
+		case readFrame(in, &d) != nil || d.Version != wireVersion || d.OfferID != offerID || d.Accept == nil:
+			done <- errInvalidDecision
+		case !*d.Accept:
+			done <- errOfferRejected
+		default:
+			done <- nil
+		}
+	}()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-done:
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return err
 	}
-	if err == nil {
-		err = errors.New("missing metadata-only stop")
+}
+
+func awaitOfferDecision(ctx context.Context, in *bufio.Reader, out *json.Encoder, entries []transfer.ManifestEntry) error {
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return err
 	}
-	return nil, err
+	offerID := hex.EncodeToString(nonce[:])
+	decisionCtx, cancel := context.WithTimeout(ctx, transfer.OfferDecisionTimeout)
+	defer cancel()
+	if decisionCtx.Err() != nil {
+		return decisionCtx.Err()
+	}
+	if err := out.Encode(manifestResult{Version: wireVersion, Status: "awaiting_decision", OfferID: offerID, Entries: entries}); err != nil {
+		return errControlWrite
+	}
+	return waitDecision(decisionCtx, in, offerID)
 }
 
 func run(ctx context.Context, in io.Reader, out io.Writer) int {
+	reader := bufio.NewReaderSize(in, requestLimit)
+	writer := json.NewEncoder(out)
 	result := manifestResult{Version: wireVersion, Status: "invalid_request"}
-	request, err := readRequest(in)
+	request, err := readRequest(reader)
 	if err == nil {
-		result.Entries, err = captureManifest(ctx, request)
+		err = captureManifest(ctx, request, func(ctx context.Context, entries []transfer.ManifestEntry) error {
+			return awaitOfferDecision(ctx, reader, writer, entries)
+		})
 		switch {
-		case err == nil:
-			result.Status = "manifest_only"
+		case ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
+			result.Status = "cancelled"
+		case errors.Is(err, croc.ErrManifestOnly):
+			result.Status = "accepted_no_payload"
+		case errors.Is(err, errOfferRejected):
+			result.Status = "rejected"
+		case errors.Is(err, errInvalidDecision):
+			result.Status = "invalid_decision"
 		case errors.Is(err, transfer.ErrUnsafeOffer):
 			result.Status = "unsafe_offer"
 		case errors.Is(err, transfer.ErrResourceLimit):
 			result.Status = "resource_limit"
-		case ctx.Err() != nil:
-			result.Status = "cancelled"
 		default:
 			result.Status = "metadata_failed"
 		}
 	}
-	if err := json.NewEncoder(out).Encode(result); err != nil || result.Status != "manifest_only" {
+	if err := writer.Encode(result); err != nil {
 		return 1
 	}
-	return 0
+	switch result.Status {
+	case "accepted_no_payload", "rejected":
+		return 0
+	default:
+		return 1
+	}
 }
 
 func main() {
-	// Only the structured result uses the inherited stdout pipe. Any terminal
+	// Only structured frames use the inherited stdout pipe. Any terminal
 	// output from upstream Go code stays outside the control stream.
 	control := os.Stdout
 	sink, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)

@@ -27,9 +27,15 @@ Module `worker/` nối callback Croc với bộ chiếu manifest của backend. 
 
 ```text
 go build -tags croc_no_tailcat .
-go test -tags croc_no_tailcat -run TestWorkerLoopbackProjectsManifestAcrossPipes -v .
+go test -tags croc_no_tailcat -run TestWorkerLoopbackWaitsForDecisionWithoutStartingPayload -v .
 ```
 
-Worker nhận đúng một frame JSON có phiên bản từ stdin riêng, giới hạn 8 KiB và đợi EOF. Worker chỉ chấp nhận relay loopback dạng địa chỉ IP, tắt đường local discovery và không lấy mã từ argv hoặc env. Stdout dành cho đúng một kết quả có kiểu. `manifest_only` nghĩa là metadata hợp lệ và phiên đã dừng trước payload. Worker không chuyển source path, ID máy hoặc địa chỉ peer sang tiến trình gọi. Test Windows chạy sender qua relay TCP loopback và worker trong tiến trình con, kiểm danh sách Unicode và thư mục rỗng, không có mã hoặc mật khẩu trong kết quả và không có mục mới trong thư mục nhận.
+Worker chỉ chấp nhận relay loopback dạng địa chỉ IP, tắt local discovery và không lấy mã từ argv hoặc env. Giao thức pipe riêng v2 dùng một giá trị JSON trên mỗi dòng, giới hạn mỗi frame đầu vào 8 KiB và không yêu cầu đóng stdin giữa các bước.
 
-Spike chưa giữ phiên chờ đồng ý, cấp phép tải, nối Croc vào staging, hoặc chạy trên hai máy Windows. Giới hạn giải mã upstream trước hook vẫn chưa phải ngân sách MVP. Đây không phải kênh production hay bằng chứng nghiệm thu relay công cộng. Host giữ `NOT_INTEGRATED`.
+1. Tiến trình gọi gửi frame bắt đầu trên stdin. Worker trả `awaiting_decision` kèm manifest và `offerID` ngẫu nhiên trên stdout, rồi giữ nguyên phiên Croc chờ quyết định trong callback.
+2. Tiến trình gọi gửi frame `{"version":2,"offerID":"<offer hiện tại>","accept":true}` hoặc `accept:false`. Quyết định phải đến trong thời hạn offer và không vượt quá deadline tổng của worker. Pipe bị đóng, sai offer hoặc sai frame đều dừng phiên.
+3. Worker trả đúng một frame kết thúc. `accepted_no_payload` nghĩa là nhận được quyết định đồng ý nhưng **không** yêu cầu payload. Các trạng thái khác gồm `rejected`, `invalid_decision` và `cancelled`. Kết quả không chứa mã kết nối, mật khẩu, source path, ID máy hoặc địa chỉ peer.
+
+Test loopback chạy sender và relay TCP, giữ stdin mở khi worker chờ, rồi kiểm các nhánh đồng ý, từ chối, sai offer và đóng pipe. Ca đồng ý vẫn không cho sender báo truyền thành công và không ghi vào thư mục nhận.
+
+Spike đã giữ được phiên chờ đồng ý trong worker thử nghiệm. Chưa nối quyết định với permit của Coordinator, chưa nhận payload vào staging, và chưa nghiệm thu trên hai máy Windows. Giới hạn giải mã upstream trước hook vẫn chưa phải ngân sách MVP. Đây không phải kênh production hay bằng chứng nghiệm thu relay công cộng. Host giữ `NOT_INTEGRATED`.
