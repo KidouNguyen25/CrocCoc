@@ -21,12 +21,13 @@ type SessionSnapshot struct {
 // Engine I/O and cleanup must run outside this lock. Terminal sessions remain
 // busy until Release confirms the caller has completed resource cleanup.
 type Coordinator struct {
-	mu        sync.Mutex
-	active    *SessionSnapshot
-	recent    *SessionSnapshot
-	receiving bool
-	offer     *ReceiveOffer
-	decided   bool
+	mu             sync.Mutex
+	active         *SessionSnapshot
+	recent         *SessionSnapshot
+	receiving      bool
+	offer          *ReceiveOffer
+	decided        bool
+	manifestDigest [32]byte
 }
 
 // Begin allocates one fresh opaque ID. It does not start an engine.
@@ -60,6 +61,7 @@ func (c *Coordinator) begin(receiving bool) (SessionSnapshot, error) {
 	c.receiving = receiving
 	c.offer = nil
 	c.decided = false
+	c.manifestDigest = [32]byte{}
 	return snapshot, nil
 }
 
@@ -78,6 +80,7 @@ func (c *Coordinator) Advance(id string, next State) (SessionSnapshot, bool) {
 	if next != AwaitingAcceptance {
 		c.offer = nil
 		c.decided = false
+		c.manifestDigest = [32]byte{}
 	}
 	return *c.active, true
 }
@@ -113,5 +116,6 @@ func (c *Coordinator) Release(id string) bool {
 	snapshot := *c.active
 	c.recent = &snapshot
 	c.active = nil
+	c.manifestDigest = [32]byte{}
 	return true
 }

@@ -22,6 +22,7 @@ func (c *Coordinator) PresentReceiveOffer(
 	copyOffer := offer.Clone()
 	c.offer = &copyOffer
 	c.decided = false
+	c.manifestDigest = fingerprintManifest(entries)
 	c.active.State = AwaitingAcceptance
 	c.active.Revision++
 	return *c.active, offer.Clone(), nil
