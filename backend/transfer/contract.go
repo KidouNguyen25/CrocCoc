@@ -13,13 +13,16 @@ var ErrNotIntegrated = errors.New("Croc chưa được tích hợp trong bản k
 type State string
 
 const (
-	Idle           State = "IDLE"
-	Preparing      State = "PREPARING"
-	WaitingForPeer State = "WAITING_FOR_PEER"
-	Transferring   State = "TRANSFERRING"
-	Completed      State = "COMPLETED"
-	Failed         State = "FAILED"
-	Cancelled      State = "CANCELLED"
+	Idle               State = "IDLE"
+	Preparing          State = "PREPARING"
+	WaitingForPeer     State = "WAITING_FOR_PEER"
+	AwaitingAcceptance State = "AWAITING_ACCEPTANCE"
+	Transferring       State = "TRANSFERRING"
+	Finalizing         State = "FINALIZING"
+	Cancelling         State = "CANCELLING"
+	Completed          State = "COMPLETED"
+	Failed             State = "FAILED"
+	Cancelled          State = "CANCELLED"
 )
 
 type CrocInfo struct {
