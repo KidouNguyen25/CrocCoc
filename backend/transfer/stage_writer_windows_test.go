@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -160,5 +161,61 @@ func TestStageWriterRejectsReplacedParentAndCancelledWrite(t *testing.T) {
 	}
 	if _, err := os.Stat(file); !os.IsNotExist(err) {
 		t.Fatalf("replacement directory was modified: %v", err)
+	}
+}
+
+func TestStageWriterAcceptsOnlyCompleteApprovedChunkedFiles(t *testing.T) {
+	destination := t.TempDir()
+	entries := []ManifestEntry{
+		{Path: "complete.txt", SizeBytes: crocPayloadChunkSize + 1},
+		{Path: "incomplete.txt", SizeBytes: crocPayloadChunkSize + 1},
+	}
+	lease, err := PreflightReceiveDestination(destination, entries)
+	if errors.Is(err, ErrUnsupportedDestination) {
+		t.Skip("requires NTFS")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Close()
+	stage, err := prepareReceiveStageAt(lease, entries, filepath.Join(t.TempDir(), "journal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stage.Close()
+	if err := stage.prepareStageDirectories(entries); err != nil {
+		t.Fatal(err)
+	}
+
+	first := bytes.Repeat([]byte{'a'}, crocPayloadChunkSize)
+	var closed io.WriterAt
+	if err := stage.writeStageChunks(t.Context(), entries[0], func(w io.WriterAt) error {
+		closed = w
+		if _, err := w.WriteAt([]byte("b"), crocPayloadChunkSize); err != nil {
+			return err
+		}
+		_, err := w.WriteAt(first, 0)
+		return err
+	}); err != nil {
+		t.Fatalf("out-of-order payload failed: %v", err)
+	}
+	if _, err := closed.WriteAt(first, 0); !errors.Is(err, ErrPayloadMismatch) {
+		t.Fatal("writer remained usable after completion")
+	}
+	actual, err := os.ReadFile(filepath.Join(destination, stage.StageName, "payload", entries[0].Path))
+	if err != nil || !bytes.Equal(actual, append(first, 'b')) {
+		t.Fatal("staging bytes do not match the approved chunked file")
+	}
+	err = stage.writeStageChunks(t.Context(), entries[1], func(w io.WriterAt) error {
+		// The last chunk extends the on-disk file to its expected size
+		// while leaving the beginning unwritten. It must not be accepted.
+		_, err := w.WriteAt([]byte("b"), crocPayloadChunkSize)
+		return err
+	})
+	if !errors.Is(err, ErrPayloadMismatch) {
+		t.Fatalf("sparse incomplete payload accepted: %v", err)
+	}
+	if err := stage.AuditStagedPayload(); !errors.Is(err, ErrInvalidStaging) {
+		t.Fatalf("audit accepted an incomplete file: %v", err)
 	}
 }

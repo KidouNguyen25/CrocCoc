@@ -165,13 +165,43 @@ func (s *ReceiveStage) openStageParent(parts []string) (windows.Handle, func(), 
 // and cannot be published by this function. No user destination is touched.
 // The caller must validate all manifest entries and ensure acceptance first.
 func (s *ReceiveStage) writeStageFile(ctx context.Context, entry ManifestEntry, reader io.Reader) error {
+	if reader == nil {
+		return ErrUnsafeStorage
+	}
+	return s.writeStagePayload(ctx, entry, func(out *os.File) error {
+		return copyExactPayload(ctx, out, reader, entry.SizeBytes)
+	})
+}
+
+// writeStageChunks holds the verified staging chain for one fresh file while
+// an engine supplies the pinned relay path's aligned chunks. The io.WriterAt
+// is revoked when consume returns. It is not an engine receive permit.
+func (s *ReceiveStage) writeStageChunks(ctx context.Context, entry ManifestEntry, consume func(io.WriterAt) error) error {
+	if consume == nil {
+		return ErrUnsafeStorage
+	}
+	return s.writeStagePayload(ctx, entry, func(out *os.File) error {
+		writer, err := newPayloadChunkWriter(ctx, out, entry.SizeBytes)
+		if err != nil {
+			return err
+		}
+		consumeErr := consume(writer)
+		finishErr := writer.seal()
+		if consumeErr != nil {
+			return ErrPayloadMismatch
+		}
+		return finishErr
+	})
+}
+
+func (s *ReceiveStage) writeStagePayload(ctx context.Context, entry ManifestEntry, write func(*os.File) error) error {
 	if s == nil {
 		return ErrUnsafeStorage
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.payload == 0 || !s.prepared || entry.Directory || entry.SizeBytes < 0 ||
-		entry.SizeBytes > MaxManifestBytes || reader == nil {
+		entry.SizeBytes > MaxManifestBytes {
 		return ErrUnsafeStorage
 	}
 	entry.Path = strings.ReplaceAll(entry.Path, "\\", "/")
@@ -196,7 +226,7 @@ func (s *ReceiveStage) writeStageFile(ctx context.Context, entry ManifestEntry, 
 		return err
 	}
 	defer out.Close()
-	if err := copyExactPayload(ctx, out, reader, entry.SizeBytes); err != nil {
+	if err := write(out); err != nil {
 		return err
 	}
 	if err := out.Sync(); err != nil {
@@ -204,6 +234,9 @@ func (s *ReceiveStage) writeStageFile(ctx context.Context, entry ManifestEntry, 
 	}
 	if err := out.Close(); err != nil {
 		return ErrUnsafeStorage
+	}
+	if ctx.Err() != nil {
+		return ErrPayloadMismatch
 	}
 	s.completed[strings.ToUpper(entry.Path)] = id
 	return nil
