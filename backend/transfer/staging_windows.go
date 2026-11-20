@@ -141,7 +141,11 @@ func prepareReceiveStageAt(lease *DestinationLease, entries []ManifestEntry, jou
 	}
 	stage.StageName = stagePrefix + hex.EncodeToString(stageID[:])
 	var stageIdentity DirectoryIdentity
-	stage.stage, stageIdentity, err = createChildDirectory(root, stage.StageName)
+	security, err := privateStageSecurity()
+	if err != nil {
+		return nil, err
+	}
+	stage.stage, stageIdentity, err = createChildDirectoryWithSecurity(root, stage.StageName, security)
 	if err != nil {
 		return nil, err
 	}

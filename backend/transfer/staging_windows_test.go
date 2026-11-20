@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/windows"
 )
 
 func TestReceiveStageCreatesExclusiveSameVolumeJournalAndMarker(t *testing.T) {
@@ -93,5 +95,39 @@ func TestStageFailsBeforeWritingUnsafeManifest(t *testing.T) {
 	after, err := os.ReadDir(dir)
 	if err != nil || len(after) != len(before) {
 		t.Fatalf("unsafe input mutated destination: %v", err)
+	}
+}
+
+func TestReceiveStageProtectsItsACLAndInheritsIntoPayload(t *testing.T) {
+	stage, destination, _ := auditFixture(t)
+	root := filepath.Join(destination, stage.StageName)
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedACEs := uint16(2)
+	if user.User.Sid.String() == "S-1-5-18" {
+		expectedACEs = 1
+	}
+	for _, item := range []struct {
+		path      string
+		protected bool
+	}{
+		{root, true},
+		{filepath.Join(root, "payload"), false},
+		{filepath.Join(root, "payload", "album"), false},
+	} {
+		desc, err := windows.GetNamedSecurityInfo(item.path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+		if err != nil {
+			t.Fatal(err)
+		}
+		control, _, err := desc.Control()
+		if err != nil || (control&windows.SE_DACL_PROTECTED != 0) != item.protected {
+			t.Fatalf("unexpected DACL protection: control=%x err=%v", control, err)
+		}
+		dacl, _, err := desc.DACL()
+		if err != nil || dacl == nil || dacl.AceCount != expectedACEs {
+			t.Fatal("staging DACL differs from process-user and LocalSystem policy")
+		}
 	}
 }

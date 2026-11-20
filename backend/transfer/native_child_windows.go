@@ -22,6 +22,10 @@ var ErrUnsafeStorage = errors.New("UNSUPPORTED_DESTINATION: không thể tạo v
 // The name must be exactly one safe Windows component. FILE_CREATE is atomic:
 // it fails if that name already exists; it never opens or replaces an entry.
 func createChildDirectory(parent windows.Handle, name string) (windows.Handle, DirectoryIdentity, error) {
+	return createChildDirectoryWithSecurity(parent, name, nil)
+}
+
+func createChildDirectoryWithSecurity(parent windows.Handle, name string, security *windows.SECURITY_DESCRIPTOR) (windows.Handle, DirectoryIdentity, error) {
 	if !safeWindowsComponent(name) {
 		return 0, DirectoryIdentity{}, ErrUnsafeStorage
 	}
@@ -30,10 +34,11 @@ func createChildDirectory(parent windows.Handle, name string) (windows.Handle, D
 		return 0, DirectoryIdentity{}, ErrUnsafeStorage
 	}
 	attributes := windows.OBJECT_ATTRIBUTES{
-		Length:        uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})),
-		RootDirectory: parent,
-		ObjectName:    unicodeName,
-		Attributes:    windows.OBJ_CASE_INSENSITIVE,
+		Length:             uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})),
+		RootDirectory:      parent,
+		ObjectName:         unicodeName,
+		Attributes:         windows.OBJ_CASE_INSENSITIVE,
+		SecurityDescriptor: security,
 	}
 	var handle windows.Handle
 	var iosb windows.IO_STATUS_BLOCK
@@ -47,6 +52,7 @@ func createChildDirectory(parent windows.Handle, name string) (windows.Handle, D
 		windows.FILE_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT|
 			windows.FILE_SYNCHRONOUS_IO_NONALERT, 0, 0)
 	runtime.KeepAlive(unicodeName)
+	runtime.KeepAlive(security)
 	if err != nil {
 		return 0, DirectoryIdentity{}, ErrUnsafeStorage
 	}
