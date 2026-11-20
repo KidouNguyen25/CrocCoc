@@ -36,18 +36,19 @@ type StageOwnership struct {
 // Only storage code with an explicit handle should create payload children.
 // Close releases handles; it intentionally DOES NOT remove any directory.
 type ReceiveStage struct {
-	StageName       string
-	stage           windows.Handle
-	payload         windows.Handle
-	journalPath     string
-	ownership       StageOwnership
-	mu              sync.Mutex
-	allowed         map[string]ManifestEntry
-	completed       map[string]bool
-	prepared        bool
-	destinationPath string
-	payloadID       DirectoryIdentity
-	manifestDigest  [32]byte
+	StageName        string
+	stage            windows.Handle
+	payload          windows.Handle
+	journalPath      string
+	ownership        StageOwnership
+	mu               sync.Mutex
+	allowed          map[string]ManifestEntry
+	completed        map[string]bool
+	stageDirectories map[string]DirectoryIdentity
+	prepared         bool
+	destinationPath  string
+	payloadID        DirectoryIdentity
+	manifestDigest   [32]byte
 }
 
 func (s *ReceiveStage) Ownership() StageOwnership {

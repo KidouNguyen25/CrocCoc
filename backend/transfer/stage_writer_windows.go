@@ -81,25 +81,23 @@ func (s *ReceiveStage) prepareStageDirectories(entries []ManifestEntry) error {
 			return ErrUnsafeOffer
 		}
 	}
-	done := make(map[string]bool)
+	s.stageDirectories = make(map[string]DirectoryIdentity)
 	for _, entry := range entries {
 		if !entry.Directory {
 			continue
 		}
 		path := strings.ReplaceAll(entry.Path, "\\", "/")
 		parts := strings.Split(path, "/")
-		if len(parts) > 1 && !done[strings.Join(parts[:len(parts)-1], "/")] {
+		if len(parts) > 1 && s.stageDirectories[strings.Join(parts[:len(parts)-1], "/")] == (DirectoryIdentity{}) {
 			// Deliberately require an explicit, previously created parent.
 			return ErrUnsafeOffer
 		}
-		parent, err := s.openStageParent(parts[:len(parts)-1])
+		parent, closeParents, err := s.openStageParent(parts[:len(parts)-1])
 		if err != nil {
 			return err
 		}
 		h, info, err := createChildDirectory(parent, parts[len(parts)-1])
-		if parent != s.payload {
-			_ = windows.CloseHandle(parent)
-		}
+		closeParents()
 		if err != nil || info.VolumeSerial != s.ownership.Stage.VolumeSerial {
 			if h != 0 {
 				_ = windows.CloseHandle(h)
@@ -109,7 +107,7 @@ func (s *ReceiveStage) prepareStageDirectories(entries []ManifestEntry) error {
 		if err := windows.CloseHandle(h); err != nil {
 			return ErrUnsafeStorage
 		}
-		done[path] = true
+		s.stageDirectories[path] = info
 	}
 	for _, entry := range entries {
 		if entry.Directory {
@@ -117,7 +115,7 @@ func (s *ReceiveStage) prepareStageDirectories(entries []ManifestEntry) error {
 		}
 		path := strings.ReplaceAll(entry.Path, "\\", "/")
 		parts := strings.Split(path, "/")
-		if len(parts) > 1 && !done[strings.Join(parts[:len(parts)-1], "/")] {
+		if len(parts) > 1 && s.stageDirectories[strings.Join(parts[:len(parts)-1], "/")] == (DirectoryIdentity{}) {
 			return ErrUnsafeOffer
 		}
 	}
@@ -125,19 +123,41 @@ func (s *ReceiveStage) prepareStageDirectories(entries []ManifestEntry) error {
 	return nil
 }
 
-func (s *ReceiveStage) openStageParent(parts []string) (windows.Handle, error) {
+// Keep every verified directory in the chain open without delete sharing
+// until the write finishes. Descendant operations never re-resolve an
+// unverified ancestor by name.
+func (s *ReceiveStage) openStageParent(parts []string) (windows.Handle, func(), error) {
 	parent := s.payload
-	for _, part := range parts {
-		next, _, err := openChildDirectory(parent, part, s.ownership.Stage.VolumeSerial)
-		if parent != s.payload {
-			_ = windows.CloseHandle(parent)
+	opened := make([]windows.Handle, 0, len(parts))
+	closeParents := func() {
+		for i := len(opened) - 1; i >= 0; i-- {
+			_ = windows.CloseHandle(opened[i])
 		}
+	}
+	var path string
+	for _, part := range parts {
+		if path != "" {
+			path += "/"
+		}
+		path += part
+		expected, found := s.stageDirectories[path]
+		if !found {
+			closeParents()
+			return 0, nil, ErrUnsafeStorage
+		}
+		next, actual, err := openChildDirectory(parent, part, s.ownership.Stage.VolumeSerial)
 		if err != nil {
-			return 0, err
+			closeParents()
+			return 0, nil, err
+		}
+		opened = append(opened, next)
+		if actual != expected {
+			closeParents()
+			return 0, nil, ErrUnsafeStorage
 		}
 		parent = next
 	}
-	return parent, nil
+	return parent, closeParents, nil
 }
 
 // writeStageFile writes an exact finite payload into a freshly created file.
@@ -163,27 +183,26 @@ func (s *ReceiveStage) writeStageFile(ctx context.Context, entry ManifestEntry, 
 	if !ok {
 		return ErrUnsafeOffer
 	}
-	parent, err := s.openStageParent(parts[:len(parts)-1])
+	if ctx == nil || ctx.Err() != nil {
+		return ErrPayloadMismatch
+	}
+	parent, closeParents, err := s.openStageParent(parts[:len(parts)-1])
 	if err != nil {
 		return err
 	}
-	defer func() {
-		if parent != s.payload {
-			_ = windows.CloseHandle(parent)
-		}
-	}()
+	defer closeParents()
 	out, err := createChildPayloadFile(parent, parts[len(parts)-1], s.ownership.Stage.VolumeSerial)
 	if err != nil {
 		return err
 	}
 	defer out.Close()
-	if err := ctx.Err(); err != nil {
-		return ErrPayloadMismatch
-	}
 	if err := copyExactPayload(ctx, out, reader, entry.SizeBytes); err != nil {
 		return err
 	}
 	if err := out.Sync(); err != nil {
+		return ErrUnsafeStorage
+	}
+	if err := out.Close(); err != nil {
 		return ErrUnsafeStorage
 	}
 	s.completed[strings.ToUpper(entry.Path)] = true

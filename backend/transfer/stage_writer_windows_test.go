@@ -114,3 +114,51 @@ func TestReceivePreflightRejectsImplicitDirectory(t *testing.T) {
 		t.Fatalf("preflight modified destination: count=%d err=%v", len(items), err)
 	}
 }
+
+func TestStageWriterRejectsReplacedParentAndCancelledWrite(t *testing.T) {
+	destination := t.TempDir()
+	entries := []ManifestEntry{
+		{Path: "folder", Directory: true},
+		{Path: "folder/photo.txt", SizeBytes: 1},
+	}
+	lease, err := PreflightReceiveDestination(destination, entries)
+	if errors.Is(err, ErrUnsupportedDestination) {
+		t.Skip("requires NTFS")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Close()
+	stage, err := prepareReceiveStageAt(lease, entries, filepath.Join(t.TempDir(), "journal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stage.Close()
+	if err := stage.prepareStageDirectories(entries); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(destination, stage.StageName, "payload", "folder")
+	file := filepath.Join(dir, "photo.txt")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, invalid := range []context.Context{nil, ctx} {
+		if err := stage.writeStageFile(invalid, entries[1], bytes.NewReader([]byte("x"))); !errors.Is(err, ErrPayloadMismatch) {
+			t.Fatalf("invalid context accepted: %v", err)
+		}
+	}
+	if _, err := os.Stat(file); !os.IsNotExist(err) {
+		t.Fatalf("invalid context created a file: %v", err)
+	}
+	if err := os.Rename(dir, dir+"-original"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := stage.writeStageFile(context.Background(), entries[1], bytes.NewReader([]byte("x"))); !errors.Is(err, ErrUnsafeStorage) {
+		t.Fatalf("replaced directory accepted: %v", err)
+	}
+	if _, err := os.Stat(file); !os.IsNotExist(err) {
+		t.Fatalf("replacement directory was modified: %v", err)
+	}
+}
