@@ -21,13 +21,26 @@ type SessionSnapshot struct {
 // Engine I/O and cleanup must run outside this lock. Terminal sessions remain
 // busy until Release confirms the caller has completed resource cleanup.
 type Coordinator struct {
-	mu     sync.Mutex
-	active *SessionSnapshot
-	recent *SessionSnapshot
+	mu        sync.Mutex
+	active    *SessionSnapshot
+	recent    *SessionSnapshot
+	receiving bool
+	offer     *ReceiveOffer
+	decided   bool
 }
 
 // Begin allocates one fresh opaque ID. It does not start an engine.
 func (c *Coordinator) Begin() (SessionSnapshot, error) {
+	return c.begin(false)
+}
+
+// BeginReceive starts a receiver session; unlike a sender it must pass
+// manifest presentation and explicit consent before any payload processing.
+func (c *Coordinator) BeginReceive() (SessionSnapshot, error) {
+	return c.begin(true)
+}
+
+func (c *Coordinator) begin(receiving bool) (SessionSnapshot, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.active != nil {
@@ -44,6 +57,9 @@ func (c *Coordinator) Begin() (SessionSnapshot, error) {
 	}
 	c.active = &snapshot
 	c.recent = nil
+	c.receiving = receiving
+	c.offer = nil
+	c.decided = false
 	return snapshot, nil
 }
 
@@ -53,11 +69,16 @@ func (c *Coordinator) Advance(id string, next State) (SessionSnapshot, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.active == nil || c.active.TransferID != id ||
-		!CanTransition(c.active.State, next) {
+		!CanTransition(c.active.State, next) ||
+		next == AwaitingAcceptance || (c.receiving && next == Transferring) {
 		return SessionSnapshot{}, false
 	}
 	c.active.State = next
 	c.active.Revision++
+	if next != AwaitingAcceptance {
+		c.offer = nil
+		c.decided = false
+	}
 	return *c.active, true
 }
 
