@@ -89,23 +89,28 @@ func TestStageWriterRejectsShortAndExcessPayload(t *testing.T) {
 	}
 }
 
-func TestStageWriterRejectsImplicitDirectory(t *testing.T) {
+func TestReceivePreflightRejectsImplicitDirectory(t *testing.T) {
 	entries := []ManifestEntry{{Path: "missing/child.txt", SizeBytes: 1}}
 	dest := t.TempDir()
-	lease, err := PreflightReceiveDestination(dest, entries)
+	probe, err := OpenReceiveDestinationLease(dest)
 	if errors.Is(err, ErrUnsupportedDestination) {
 		t.Skip("requires NTFS")
 	}
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer lease.Close()
-	stage, err := prepareReceiveStageAt(lease, entries, filepath.Join(t.TempDir(), "journal"))
-	if err != nil {
-		t.Fatal(err)
+	probe.Close()
+
+	lease, err := PreflightReceiveDestination(dest, entries)
+	if lease != nil {
+		lease.Close()
+		t.Fatal("preflight granted a destination lease for an implicit parent")
 	}
-	defer stage.Close()
-	if err := stage.prepareStageDirectories(entries); !errors.Is(err, ErrUnsafeOffer) {
+	if !errors.Is(err, ErrUnsafeOffer) {
 		t.Fatalf("implicit parent accepted: %v", err)
+	}
+	items, err := os.ReadDir(dest)
+	if err != nil || len(items) != 0 {
+		t.Fatalf("preflight modified destination: count=%d err=%v", len(items), err)
 	}
 }

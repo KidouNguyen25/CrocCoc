@@ -111,6 +111,9 @@ func prepareReceiveStageAt(lease *DestinationLease, entries []ManifestEntry, jou
 	if err := lease.CheckCapacity(total); err != nil {
 		return nil, err
 	}
+	if err := lease.CheckReceiveRootVacancy(entries); err != nil {
+		return nil, err
+	}
 	root, err := openWritableDestination(lease)
 	if err != nil {
 		return nil, err

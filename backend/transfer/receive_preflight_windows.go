@@ -9,10 +9,9 @@ import "os"
 // conflicts BEFORE showing an offer or requesting any payload. The returned
 // lease must be closed by its caller. On failure all handles are released.
 //
-// Security boundary: name enumeration is read-only and by path; this pass
-// does not prove NTFS short-name aliases, guarantee disk capacity, or guard
-// against changes between checks. A handle-anchored staging/publish backend
-// must revalidate everything before granting any payload-write capability.
+// The native vacancy lookup includes aliases that resolve through NTFS. It
+// observes the destination without creating entries and cannot reserve a name
+// or capacity. Staging rechecks before receive, and publish uses no-replace.
 func PreflightReceiveDestination(destination string, entries []ManifestEntry) (_ *DestinationLease, err error) {
 	total, err := ValidateManifest(entries)
 	if err != nil {
@@ -43,6 +42,9 @@ func PreflightReceiveDestination(destination string, entries []ManifestEntry) (_
 		names = append(names, item.Name())
 	}
 	if err := CheckReceiveRootConflicts(entries, names); err != nil {
+		return nil, err
+	}
+	if err := lease.CheckReceiveRootVacancy(entries); err != nil {
 		return nil, err
 	}
 	if err := lease.VerifyCurrentPath(); err != nil {
