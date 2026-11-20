@@ -16,13 +16,13 @@ import (
 // createChildPayloadFile creates exactly one new ordinary file relative to a
 // native directory handle. FILE_CREATE never opens an existing file. It
 // validates the returned handle before allowing any payload bytes to be sent.
-func createChildPayloadFile(parent windows.Handle, name string, volume uint32) (*os.File, error) {
+func createChildPayloadFile(parent windows.Handle, name string, volume uint32) (*os.File, DirectoryIdentity, error) {
 	if !safeWindowsComponent(name) {
-		return nil, ErrUnsafeStorage
+		return nil, DirectoryIdentity{}, ErrUnsafeStorage
 	}
 	u, err := windows.NewNTUnicodeString(name)
 	if err != nil {
-		return nil, ErrUnsafeStorage
+		return nil, DirectoryIdentity{}, ErrUnsafeStorage
 	}
 	attr := windows.OBJECT_ATTRIBUTES{
 		Length:        uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})),
@@ -41,7 +41,7 @@ func createChildPayloadFile(parent windows.Handle, name string, volume uint32) (
 			windows.FILE_SYNCHRONOUS_IO_NONALERT, 0, 0)
 	runtime.KeepAlive(u)
 	if err != nil {
-		return nil, ErrUnsafeStorage
+		return nil, DirectoryIdentity{}, ErrUnsafeStorage
 	}
 	var info windows.ByHandleFileInformation
 	if err := windows.GetFileInformationByHandle(h, &info); err != nil ||
@@ -49,9 +49,9 @@ func createChildPayloadFile(parent windows.Handle, name string, volume uint32) (
 		info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 ||
 		info.VolumeSerialNumber != volume {
 		_ = windows.CloseHandle(h)
-		return nil, ErrUnsafeStorage
+		return nil, DirectoryIdentity{}, ErrUnsafeStorage
 	}
-	return os.NewFile(uintptr(h), name), nil
+	return os.NewFile(uintptr(h), name), stagedObjectIdentity(info), nil
 }
 
 // prepareStageDirectories creates only explicitly declared directories,
@@ -191,7 +191,7 @@ func (s *ReceiveStage) writeStageFile(ctx context.Context, entry ManifestEntry, 
 		return err
 	}
 	defer closeParents()
-	out, err := createChildPayloadFile(parent, parts[len(parts)-1], s.ownership.Stage.VolumeSerial)
+	out, id, err := createChildPayloadFile(parent, parts[len(parts)-1], s.ownership.Stage.VolumeSerial)
 	if err != nil {
 		return err
 	}
@@ -205,6 +205,6 @@ func (s *ReceiveStage) writeStageFile(ctx context.Context, entry ManifestEntry, 
 	if err := out.Close(); err != nil {
 		return ErrUnsafeStorage
 	}
-	s.completed[strings.ToUpper(entry.Path)] = true
+	s.completed[strings.ToUpper(entry.Path)] = id
 	return nil
 }

@@ -14,7 +14,7 @@ import (
 var ErrInvalidStaging = errors.New("TRANSFER_FAILED: vùng nhận không khớp danh sách đã duyệt")
 
 // AuditStagedPayload reads the stage created by our native writer and verifies
-// that its files, directories and sizes match the frozen manifest exactly.
+// that its files, directories, sizes and identities match the staged objects.
 // A missing, partial, extra or reparse-point entry fails the audit.
 //
 // Security boundary: this is a pre-publication integrity check, NOT a Croc
@@ -53,24 +53,18 @@ func (s *ReceiveStage) AuditStagedPayload() error {
 			return ErrInvalidStaging
 		}
 		seen[key] = true
-		// Inspect the Win32 reparse flag separately: junctions are not always
-		// exposed by generic filesystem walkers as symbolic links.
-		ptr, err := windows.UTF16PtrFromString(path)
+		parts := strings.Split(name, "/")
+		parent, closeParents, err := s.openStageParent(parts[:len(parts)-1])
 		if err != nil {
 			return ErrInvalidStaging
 		}
-		attrs, err := windows.GetFileAttributes(ptr)
-		if err != nil || attrs&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		defer closeParents()
+		h, err := openStagedRoot(parent, parts[len(parts)-1], expected.Directory, s.ownership.Stage.VolumeSerial)
+		if err != nil {
 			return ErrInvalidStaging
 		}
-		info, err := os.Lstat(path)
-		if err != nil || info.Mode()&os.ModeSymlink != 0 ||
-			info.IsDir() != expected.Directory {
-			return ErrInvalidStaging
-		}
-		if !expected.Directory &&
-			(!info.Mode().IsRegular() || info.Size() != expected.SizeBytes ||
-				!s.completed[key]) {
+		defer windows.CloseHandle(h)
+		if !s.matchesStagedObject(h, expected) {
 			return ErrInvalidStaging
 		}
 		return nil
@@ -111,4 +105,28 @@ func (s *ReceiveStage) verifyStagingIdentity() error {
 	}
 	_ = windows.CloseHandle(payload)
 	return nil
+}
+
+func stagedObjectIdentity(info windows.ByHandleFileInformation) DirectoryIdentity {
+	return DirectoryIdentity{
+		VolumeSerial: info.VolumeSerialNumber,
+		FileIndex:    uint64(info.FileIndexHigh)<<32 | uint64(info.FileIndexLow),
+	}
+}
+
+// matchesStagedObject uses the opened handle, not a second lookup by path.
+func (s *ReceiveStage) matchesStagedObject(h windows.Handle, entry ManifestEntry) bool {
+	var info windows.ByHandleFileInformation
+	if windows.GetFileInformationByHandle(h, &info) != nil {
+		return false
+	}
+	id := stagedObjectIdentity(info)
+	if entry.Directory {
+		expected, found := s.stageDirectories[entry.Path]
+		return found && expected == id
+	}
+	expected, found := s.completed[strings.ToUpper(entry.Path)]
+	size := uint64(info.FileSizeHigh)<<32 | uint64(info.FileSizeLow)
+	return found && expected == id && entry.SizeBytes >= 0 &&
+		size == uint64(entry.SizeBytes) && info.NumberOfLinks == 1
 }

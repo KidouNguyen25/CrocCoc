@@ -43,7 +43,7 @@ type ReceiveStage struct {
 	ownership        StageOwnership
 	mu               sync.Mutex
 	allowed          map[string]ManifestEntry
-	completed        map[string]bool
+	completed        map[string]DirectoryIdentity
 	stageDirectories map[string]DirectoryIdentity
 	prepared         bool
 	destinationPath  string
@@ -126,7 +126,7 @@ func prepareReceiveStageAt(lease *DestinationLease, entries []ManifestEntry, jou
 		entry.Path = strings.ReplaceAll(entry.Path, "\\", "/")
 		allowed[strings.ToUpper(entry.Path)] = entry
 	}
-	stage := &ReceiveStage{allowed: allowed, completed: make(map[string]bool), destinationPath: lease.path, manifestDigest: fingerprintManifest(entries)}
+	stage := &ReceiveStage{allowed: allowed, completed: make(map[string]DirectoryIdentity), destinationPath: lease.path, manifestDigest: fingerprintManifest(entries)}
 	defer func() {
 		if err != nil {
 			_ = stage.Close()

@@ -40,7 +40,7 @@ func openStagedRoot(parent windows.Handle, name string, directory bool, volume u
 	err = windows.NtCreateFile(&h,
 		windows.DELETE|windows.FILE_READ_ATTRIBUTES|windows.SYNCHRONIZE,
 		&attr, &iosb, nil, 0,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		windows.FILE_SHARE_READ,
 		windows.FILE_OPEN,
 		flags|windows.FILE_OPEN_REPARSE_POINT|windows.FILE_SYNCHRONOUS_IO_NONALERT,
 		0, 0)

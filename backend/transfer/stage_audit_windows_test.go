@@ -70,3 +70,32 @@ func TestStagingAuditRejectsExtraUnmanifestedFile(t *testing.T) {
 		t.Fatalf("unmanifested extra file accepted: %v", err)
 	}
 }
+
+func TestStagingAuditRejectsSameSizeReplacementAndHardLinks(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(string, string) error
+	}{
+		{"same-size replacement", func(file, outside string) error {
+			if err := os.Rename(file, outside); err != nil {
+				return err
+			}
+			return os.WriteFile(file, []byte("other"), 0600)
+		}},
+		{"additional hard link", os.Link},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stage, dir, entries := auditFixture(t)
+			if err := stage.writeStageFile(context.Background(), entries[1], bytes.NewReader([]byte("hello"))); err != nil {
+				t.Fatal(err)
+			}
+			file := filepath.Join(dir, stage.StageName, "payload", "album", "photo.txt")
+			if err := tc.change(file, filepath.Join(dir, "test-fixture-copy.txt")); err != nil {
+				t.Fatal(err)
+			}
+			if err := stage.AuditStagedPayload(); !errors.Is(err, ErrInvalidStaging) {
+				t.Fatalf("changed object accepted: %v", err)
+			}
+		})
+	}
+}

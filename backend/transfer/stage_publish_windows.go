@@ -66,6 +66,12 @@ func publishAuditedRoots(lease *DestinationLease, stage *ReceiveStage, entries [
 			_ = stage.setOwnershipStatus("partial")
 			return result, ErrPublishFailed
 		}
+		if !stage.matchesStagedObject(from, entry) {
+			_ = windows.CloseHandle(from)
+			result.Partial = len(result.Published) > 0
+			_ = stage.setOwnershipStatus("partial")
+			return result, ErrInvalidStaging
+		}
 		err = renameNativeNoReplace(from, dest, entry.Path)
 		closeErr := windows.CloseHandle(from)
 		if err != nil || closeErr != nil {
