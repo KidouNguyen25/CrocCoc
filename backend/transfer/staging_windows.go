@@ -47,6 +47,7 @@ type ReceiveStage struct {
 	prepared        bool
 	destinationPath string
 	payloadID       DirectoryIdentity
+	manifestDigest  [32]byte
 }
 
 func (s *ReceiveStage) Ownership() StageOwnership {
@@ -121,7 +122,7 @@ func prepareReceiveStageAt(lease *DestinationLease, entries []ManifestEntry, jou
 		entry.Path = strings.ReplaceAll(entry.Path, "\\", "/")
 		allowed[strings.ToUpper(entry.Path)] = entry
 	}
-	stage := &ReceiveStage{allowed: allowed, completed: make(map[string]bool), destinationPath: lease.path}
+	stage := &ReceiveStage{allowed: allowed, completed: make(map[string]bool), destinationPath: lease.path, manifestDigest: fingerprintManifest(entries)}
 	defer func() {
 		if err != nil {
 			_ = stage.Close()
