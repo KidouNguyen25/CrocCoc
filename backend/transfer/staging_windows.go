@@ -36,14 +36,17 @@ type StageOwnership struct {
 // Only storage code with an explicit handle should create payload children.
 // Close releases handles; it intentionally DOES NOT remove any directory.
 type ReceiveStage struct {
-	StageName   string
-	stage       windows.Handle
-	payload     windows.Handle
-	journalPath string
-	ownership   StageOwnership
-	mu          sync.Mutex
-	allowed     map[string]ManifestEntry
-	prepared    bool
+	StageName       string
+	stage           windows.Handle
+	payload         windows.Handle
+	journalPath     string
+	ownership       StageOwnership
+	mu              sync.Mutex
+	allowed         map[string]ManifestEntry
+	completed       map[string]bool
+	prepared        bool
+	destinationPath string
+	payloadID       DirectoryIdentity
 }
 
 func (s *ReceiveStage) Ownership() StageOwnership {
@@ -118,7 +121,7 @@ func prepareReceiveStageAt(lease *DestinationLease, entries []ManifestEntry, jou
 		entry.Path = strings.ReplaceAll(entry.Path, "\\", "/")
 		allowed[strings.ToUpper(entry.Path)] = entry
 	}
-	stage := &ReceiveStage{allowed: allowed}
+	stage := &ReceiveStage{allowed: allowed, completed: make(map[string]bool), destinationPath: lease.path}
 	defer func() {
 		if err != nil {
 			_ = stage.Close()
@@ -145,6 +148,7 @@ func prepareReceiveStageAt(lease *DestinationLease, entries []ManifestEntry, jou
 	if err != nil || payloadIdentity.VolumeSerial != stageIdentity.VolumeSerial {
 		return nil, ErrUnsafeStorage
 	}
+	stage.payloadID = payloadIdentity
 	nonce := hex.EncodeToString(marker[:])
 	if err := createStageMarker(stage.stage, nonce); err != nil {
 		return nil, err

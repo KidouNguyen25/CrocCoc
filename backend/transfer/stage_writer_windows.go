@@ -199,5 +199,6 @@ func (s *ReceiveStage) writeStageFile(ctx context.Context, entry ManifestEntry, 
 	if err := out.Sync(); err != nil {
 		return ErrUnsafeStorage
 	}
+	s.completed[strings.ToUpper(entry.Path)] = true
 	return nil
 }
