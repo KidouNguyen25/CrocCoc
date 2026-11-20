@@ -1,0 +1,242 @@
+diff --git a/src/croc/croc.go b/src/croc/croc.go
+--- a/src/croc/croc.go
++++ b/src/croc/croc.go
+@@ -189,6 +189,8 @@
+
+ // Client holds the state of the croc transfer
+ type Client struct {
++	manifestOnly func(context.Context, SenderInfo) error
++
+ 	receiveChoices                  map[int]bool
+ 	bundleCommitted                 map[string]FileInfo
+ 	bundles                         bundleClientState
+@@ -2577,6 +2579,19 @@
+ }
+
+ func (c *Client) processSenderInfo(senderInfo SenderInfo) (done bool, err error) {
++	if c.manifestOnly != nil {
++		ctx := c.clientContext()
++		if err := ctx.Err(); err != nil {
++			return true, err
++		}
++		if err := c.manifestOnly(ctx, senderInfo); err != nil {
++			return true, err
++		}
++		if err := ctx.Err(); err != nil {
++			return true, err
++		}
++		return true, ErrManifestOnly
++	}
+ 	if c.lifecycleSnapshot().FileInfoTransferred {
+ 		return true, errors.New("file metadata was already finalized")
+ 	}
+diff --git a/src/croc/croccoc_manifest_only.go b/src/croc/croccoc_manifest_only.go
+new file mode 100644
+--- /dev/null
++++ b/src/croc/croccoc_manifest_only.go
+@@ -0,0 +1,21 @@
++package croc
++
++import (
++	"context"
++	"errors"
++)
++
++// ErrManifestOnly means metadata was delivered and the transfer stopped.
++// It is intentionally not a successful file transfer.
++var ErrManifestOnly = errors.New("metadata-only receive stopped before payload")
++
++// ReceiveManifest runs a single metadata-only receive attempt with a
++// dedicated client. It does not permit requesting or storing payload.
++func (c *Client) ReceiveManifest(consume func(context.Context, SenderInfo) error) error {
++	if c == nil || c.Options.IsSender || consume == nil || c.manifestOnly != nil {
++		return errors.New("invalid metadata-only receive client")
++	}
++	c.manifestOnly = consume
++	defer func() { c.manifestOnly = nil }()
++	return c.Receive()
++}
+diff --git a/src/croc/croccoc_manifest_only_test.go b/src/croc/croccoc_manifest_only_test.go
+new file mode 100644
+--- /dev/null
++++ b/src/croc/croccoc_manifest_only_test.go
+@@ -0,0 +1,179 @@
++package croc
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"os"
++	"path/filepath"
++	"testing"
++	"time"
++
++	"github.com/schollz/croc/v11/src/message"
++)
++
++func TestCrocCocManifestOnlyStopsBeforePayload(t *testing.T) {
++	for _, chunked := range []bool{false, true} {
++		mode := "legacy"
++		if chunked {
++			mode = "chunked"
++		}
++		t.Run(mode, func(t *testing.T) {
++			dir := t.TempDir()
++			t.Chdir(dir)
++			c := manifestTestClient()
++			c.peerChunkedFileInfo = chunked
++			calls := 0
++			c.manifestOnly = func(ctx context.Context, info SenderInfo) error {
++				calls++
++				if ctx.Err() != nil || len(info.FilesToTransfer) != 1 ||
++					info.FilesToTransfer[0].Name != "fixture.txt" || info.FilesToTransfer[0].Size != 4 ||
++					len(info.EmptyFoldersToTransfer) != 1 || info.EmptyFoldersToTransfer[0].FolderRemote != "empty" {
++					t.Fatal("did not receive complete metadata")
++				}
++				return nil
++			}
++			info := SenderInfo{
++				FilesToTransfer:        []FileInfo{{FolderRemote: ".", Name: "fixture.txt", Size: 4}},
++				EmptyFoldersToTransfer: []FileInfo{{FolderRemote: "empty"}},
++				TotalNumberFolders:     1,
++				HashAlgorithm:          defaultHashAlgorithm,
++			}
++			var err error
++			var done bool
++			if chunked {
++				limits := fileInfoManifestLimits{maxBatchJSONSize: 180, maxEntries: 10, maxManifestJSONSize: 10_000}
++				err = emitChunkedSenderInfo(info, limits, func(m message.Message) error {
++					m = encryptedManifestRoundTrip(t, manifestTestKey, m)
++					switch m.Type {
++					case message.TypeFileInfoStart:
++						return c.processMessageFileInfoStartWithLimits(m, limits)
++					case message.TypeFileInfoBatch:
++						if calls != 0 {
++							t.Fatal("partial metadata reached the callback")
++						}
++						return c.processMessageFileInfoBatch(m)
++					case message.TypeFileInfoEnd:
++						var endErr error
++						done, endErr = c.processMessageFileInfoEnd(m)
++						return endErr
++					default:
++						t.Fatalf("unexpected frame type %q", m.Type)
++						return nil
++					}
++				})
++			} else {
++				data, marshalErr := json.Marshal(info)
++				if marshalErr != nil {
++					t.Fatal(marshalErr)
++				}
++				frame := encryptedManifestRoundTrip(t, manifestTestKey, message.Message{Type: message.TypeFileInfo, Bytes: data})
++				done, err = c.processMessageFileInfo(frame)
++			}
++			if !done || !errors.Is(err, ErrManifestOnly) || calls != 1 {
++				t.Fatalf("done=%v err=%v callback calls=%d", done, err, calls)
++			}
++			state := c.lifecycleSnapshot()
++			if state.FileInfoTransferred || state.RecipientRequested || state.Successful || c.receiveRoot != nil {
++				t.Fatal("metadata-only receive entered the write or request path")
++			}
++			items, err := os.ReadDir(dir)
++			if err != nil || len(items) != 0 {
++				t.Fatalf("receiver directory modified: %d items, err=%v", len(items), err)
++			}
++		})
++	}
++}
++
++func TestCrocCocManifestOnlyHonorsCancellationAndRejection(t *testing.T) {
++	rejected := errors.New("local metadata rejection")
++	c := &Client{manifestOnly: func(context.Context, SenderInfo) error { return rejected }}
++	if done, err := c.processSenderInfo(SenderInfo{}); !done || !errors.Is(err, rejected) {
++		t.Fatalf("rejection: done=%v err=%v", done, err)
++	}
++
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	c.stop = newStop(ctx)
++	c.manifestOnly = func(context.Context, SenderInfo) error {
++		cancel()
++		return nil
++	}
++	if done, err := c.processSenderInfo(SenderInfo{}); !done || !errors.Is(err, context.Canceled) {
++		t.Fatalf("cancellation in callback: done=%v err=%v", done, err)
++	}
++	c.manifestOnly = func(context.Context, SenderInfo) error {
++		t.Fatal("cancelled receive invoked callback")
++		return nil
++	}
++	if done, err := c.processSenderInfo(SenderInfo{}); !done || !errors.Is(err, context.Canceled) {
++		t.Fatalf("pre-cancelled: done=%v err=%v", done, err)
++	}
++}
++
++func TestCrocCocManifestOnlyLoopback(t *testing.T) {
++	ctx, cancel := context.WithTimeout(t.Context(), 12*time.Second)
++	defer cancel()
++	relay := startTestRelayWithContext(t, ctx, 4)
++	source := filepath.Join(t.TempDir(), "fixture.txt")
++	if err := os.WriteFile(source, []byte("test"), 0600); err != nil {
++		t.Fatal(err)
++	}
++	files, folders, count, err := GetFilesInfo([]string{source}, false, false, nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	dest := t.TempDir()
++	t.Chdir(dest)
++	receiveOptions := Options{
++		SharedSecret:  "point-frost-metadata-fixture",
++		RelayAddress:  relay.address,
++		RelayPassword: "pass123",
++		DisableLocal:  true,
++		Curve:         "siec",
++		Quiet:         true,
++	}
++	sendOptions := receiveOptions
++	sendOptions.IsSender = true
++	sendOptions.RelayPorts = append([]string(nil), relay.allPorts...)
++	sendOptions.Transport = TransportRelay
++	sender, err := NewCtx(ctx, sendOptions)
++	if err != nil {
++		t.Fatal(err)
++	}
++	receiver, err := NewCtx(ctx, receiveOptions)
++	if err != nil {
++		t.Fatal(err)
++	}
++	senderDone := make(chan error, 1)
++	go func() { senderDone <- sender.Send(files, folders, count) }()
++	calls := 0
++	receiveErr := receiver.ReceiveManifest(func(_ context.Context, info SenderInfo) error {
++		calls++
++		if len(info.FilesToTransfer) != 1 || info.FilesToTransfer[0].Name != "fixture.txt" ||
++			info.FilesToTransfer[0].Size != 4 || info.FilesToTransfer[0].FolderSource != "" {
++			return errors.New("unexpected loopback metadata")
++		}
++		items, err := os.ReadDir(dest)
++		if err != nil || len(items) != 0 {
++			return errors.New("destination changed before metadata callback")
++		}
++		return nil
++	})
++	cancel()
++	select {
++	case sendErr := <-senderDone:
++		if sendErr == nil || sender.lifecycleSnapshot().RecipientRequested {
++			t.Fatal("sender was allowed to enter the payload path")
++		}
++	case <-time.After(3 * time.Second):
++		t.Fatal("sender did not terminate")
++	}
++	if !errors.Is(receiveErr, ErrManifestOnly) || calls != 1 {
++		t.Fatalf("loopback callback calls=%d err=%v", calls, receiveErr)
++	}
++	items, err := os.ReadDir(dest)
++	if err != nil || len(items) != 0 {
++		t.Fatalf("receiver path changed after stopping: %d items, err=%v", len(items), err)
++	}
++}

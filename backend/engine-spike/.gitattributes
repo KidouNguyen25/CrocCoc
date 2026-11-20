@@ -1,0 +1,2 @@
+# Unified diff context is a space followed by the original Go tab.
+croc-v11.6.4-manifest-only.patch whitespace=-space-before-tab
