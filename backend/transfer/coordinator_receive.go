@@ -43,7 +43,7 @@ func (c *Coordinator) GetReceiveOffer(id string) (ReceiveOffer, bool) {
 // DecideReceive consumes an offer at most once. Accepting is only a recorded
 // user decision, NOT an authorization to fetch payload: the backend must
 // re-run native destination preflight and win the cancellation gate before
-// moving to TRANSFERRING. That transition is intentionally not implemented.
+// moving to TRANSFERRING via CommitReceivePreflight.
 // Rejecting enters CANCELLING and requires separate engine cleanup.
 func (c *Coordinator) DecideReceive(
 	id, offerID string, accept bool, now time.Time,

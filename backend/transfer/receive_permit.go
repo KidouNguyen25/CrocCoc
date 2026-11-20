@@ -31,6 +31,22 @@ func fingerprintManifest(entries []ManifestEntry) [32]byte {
 	return sha256.Sum256(data)
 }
 
+// hasAcceptedReceiveOffer is a cheap guard before allocating native staging.
+// CommitReceivePreflight checks the same predicates again after all I/O.
+func (c *Coordinator) hasAcceptedReceiveOffer(transferID, offerID string, digest [32]byte, now time.Time) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.acceptedReceiveOfferMatches(transferID, offerID, digest, now)
+}
+
+// acceptedReceiveOfferMatches requires c.mu.
+func (c *Coordinator) acceptedReceiveOfferMatches(transferID, offerID string, digest [32]byte, now time.Time) bool {
+	return c.active != nil && c.active.TransferID == transferID &&
+		c.active.State == AwaitingAcceptance && c.receiving &&
+		c.decided && c.offer != nil && c.offer.OfferID == offerID &&
+		!c.offer.Expired(now) && digest == c.manifestDigest
+}
+
 // CommitReceivePreflight is the only receiver-specific transition to
 // TRANSFERRING. It atomically checks current user consent, the offerID,
 // the stage's immutable manifest fingerprint, and the cancellation gate.
@@ -41,12 +57,8 @@ func (c *Coordinator) CommitReceivePreflight(
 ) (SessionSnapshot, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.active == nil || c.active.TransferID != transferID ||
-		c.active.State != AwaitingAcceptance || !c.receiving ||
-		!c.decided || c.offer == nil || c.offer.OfferID != offerID ||
-		c.offer.Expired(now) || permit.transferID != transferID ||
-		permit.offerID != offerID || permit.stageID == "" ||
-		permit.digest != c.manifestDigest {
+	if permit.transferID != transferID || permit.offerID != offerID || permit.stageID == "" ||
+		!c.acceptedReceiveOfferMatches(transferID, offerID, permit.digest, now) {
 		return SessionSnapshot{}, false
 	}
 	c.active.State = Transferring
