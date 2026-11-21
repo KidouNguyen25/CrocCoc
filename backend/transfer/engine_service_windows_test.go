@@ -1,9 +1,13 @@
-//go:build windows
+//go:build windows && !croc_no_tailcat
 
 package transfer
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -46,5 +50,41 @@ func TestReceiveFailureWithoutOwnedStageReleasesService(t *testing.T) {
 
 	if _, err := service.coordinator.Begin(); err != nil {
 		t.Fatalf("clean terminal session kept coordinator busy: %v", err)
+	}
+}
+
+func TestPinWorkerExecutableLocksVerifiedFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "worker.exe")
+	contents := []byte("pinned worker test")
+	if err := os.WriteFile(path, contents, 0600); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(contents)
+	lease, err := pinWorkerExecutable(path, hex.EncodeToString(digest[:]))
+	if err != nil {
+		t.Fatalf("pin exact worker bytes: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("replacement"), 0600); err == nil {
+		_ = lease.Close()
+		t.Fatal("worker changed while pinned")
+	}
+	if err := lease.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("replacement"), 0600); err != nil {
+		t.Fatalf("worker remained locked after release: %v", err)
+	}
+}
+
+func TestPinWorkerExecutableRejectsRelativePathAndHashMismatch(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "worker.exe")
+	if err := os.WriteFile(path, []byte("worker"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pinWorkerExecutable("worker.exe", PinnedWorkerSHA256); !errors.Is(err, ErrWorkerPinMismatch) {
+		t.Fatalf("relative path accepted: %v", err)
+	}
+	if _, err := pinWorkerExecutable(path, PinnedWorkerSHA256); !errors.Is(err, ErrWorkerPinMismatch) {
+		t.Fatalf("wrong worker hash accepted: %v", err)
 	}
 }

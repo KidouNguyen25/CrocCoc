@@ -1,10 +1,9 @@
-//go:build windows
+//go:build windows && !croc_no_tailcat
 
 package transfer
 
 import (
 	"context"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,6 +26,7 @@ type engineSession struct {
 type engineService struct {
 	cfg         EngineServiceConfig
 	worker      *WorkerClient
+	workerPin   *SendSourceLease
 	coordinator Coordinator
 
 	mu       sync.Mutex
@@ -37,17 +37,16 @@ type engineService struct {
 // NewEngineService creates the Windows backend. It reports unavailable until
 // worker path, relay address and relay password are configured.
 func NewEngineService(config EngineServiceConfig) EngineController {
+	workerPin, _ := pinWorkerExecutable(config.WorkerPath, PinnedWorkerSHA256)
 	return &engineService{
 		cfg: config, worker: NewWorkerClient(config.WorkerPath),
-		sessions: make(map[string]*engineSession), sendCode: make(map[string]string),
+		workerPin: workerPin,
+		sessions:  make(map[string]*engineSession), sendCode: make(map[string]string),
 	}
 }
 
 func (s *engineService) GetCrocInfo() CrocInfo {
-	if s == nil || s.worker == nil || s.cfg.RelayAddress == "" || s.cfg.RelayPassword == "" {
-		return CrocInfo{Available: false, Message: ErrWorkerUnavailable.Error()}
-	}
-	if _, err := os.Stat(s.cfg.WorkerPath); err != nil {
+	if s == nil || s.worker == nil || s.workerPin == nil || s.cfg.RelayAddress == "" || s.cfg.RelayPassword == "" {
 		return CrocInfo{Available: false, Message: ErrWorkerUnavailable.Error()}
 	}
 	return CrocInfo{Available: true, Version: PinnedCrocVersion}

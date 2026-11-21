@@ -18,7 +18,10 @@ $outputPath = Join-Path $PSScriptRoot "croccoc-engine-spike.exe"
 $go = (Get-Command go -ErrorAction Stop).Source
 $git = (Get-Command git -ErrorAction Stop).Source
 $oldLocation = Get-Location
-$oldCgo = $env:CGO_ENABLED
+$goEnvironment = @{}
+foreach ($name in @("CGO_ENABLED", "GOARCH", "GOAMD64", "GOENV", "GOFLAGS", "GOTOOLCHAIN", "GOWORK", "GOOS")) {
+    $goEnvironment[$name] = [Environment]::GetEnvironmentVariable($name)
+}
 $ownsBuildRoot = $false
 
 function Invoke-Native {
@@ -50,14 +53,33 @@ try {
     Invoke-Native $go @("mod", "edit", "-modfile=$modPath", "-replace=github.com/schollz/croc/v11=$crocModulePath")
 
     $env:CGO_ENABLED = "0"
+    $env:GOARCH = "amd64"
+    $env:GOAMD64 = "v1"
+    $env:GOENV = "off"
+    $env:GOFLAGS = ""
+    $env:GOTOOLCHAIN = "go1.27.3"
+    $env:GOWORK = "off"
+    $env:GOOS = "windows"
     Set-Location $PSScriptRoot
     Invoke-Native $go @("test", "-modfile=$modPath", "-trimpath", "-buildvcs=false", "-tags", "croc_no_tailcat", "./...")
     Invoke-Native $go @("build", "-modfile=$modPath", "-trimpath", "-buildvcs=false", "-tags", "croc_no_tailcat", "-o", $outputPath, ".")
+    $pinPath = Join-Path $repoRoot "backend\transfer\worker_hash_windows.go"
+    $pinMatch = [regex]::Match((Get-Content $pinPath -Raw), 'const PinnedWorkerSHA256 = "([A-F0-9]{64})"')
+    if (-not $pinMatch.Success) {
+        throw "Pinned worker hash is missing or invalid."
+    }
+    $actualHash = (Get-FileHash -LiteralPath $outputPath -Algorithm SHA256).Hash
+    if ($actualHash -ne $pinMatch.Groups[1].Value) {
+        throw "Built worker hash does not match pinned worker hash."
+    }
     Write-Output "Built pinned Croc worker: $outputPath"
+    Write-Output "SHA-256: $actualHash"
 }
 finally {
     Set-Location $oldLocation
-    $env:CGO_ENABLED = $oldCgo
+    foreach ($name in $goEnvironment.Keys) {
+        [Environment]::SetEnvironmentVariable($name, $goEnvironment[$name])
+    }
     $buildRootFull = [IO.Path]::GetFullPath($buildRoot).TrimEnd('\')
     $tempRootFull = [IO.Path]::GetFullPath($tempRoot).TrimEnd('\')
     if ($ownsBuildRoot -and
