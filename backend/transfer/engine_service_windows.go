@@ -170,12 +170,16 @@ func (s *engineService) runReceive(ctx context.Context, session *engineSession, 
 	s.mu.Unlock()
 	if err == nil && stage != nil && pending != nil {
 		if adoptErr := stage.AdoptEnginePayload(); adoptErr != nil {
+			_ = stage.Close()
+			_ = pending.Close()
 			s.failSession(session.id, adoptErr)
 			s.releaseSession(session.id)
 			return
 		}
 		final, result, finalErr := FinalizeNativeReceive(&s.coordinator, session.id, pending.lease, stage, pending.entries)
 		if finalErr != nil {
+			_ = stage.Close()
+			_ = pending.Close()
 			s.failSession(session.id, finalErr)
 		} else {
 			s.emit(final, "", "")

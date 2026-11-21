@@ -54,27 +54,35 @@ func (s *ReceiveStage) AdoptEnginePayload() error {
 		if err != nil {
 			return ErrInvalidStaging
 		}
-		defer closeParents()
 		h, err := openStagedRoot(parent, parts[len(parts)-1], expected.Directory, s.ownership.Stage.VolumeSerial)
 		if err != nil {
+			closeParents()
 			return ErrInvalidStaging
 		}
-		defer windows.CloseHandle(h)
 		if expected.Directory {
-			if actual, found := s.stageDirectories[expected.Path]; !found || actual != stagedIdentityFromHandle(h) {
+			actualID := stagedIdentityFromHandle(h)
+			actual, found := s.stageDirectories[expected.Path]
+			_ = windows.CloseHandle(h)
+			closeParents()
+			if !found || actual != actualID {
 				return ErrInvalidStaging
 			}
 			return nil
 		}
 		var info windows.ByHandleFileInformation
-		if windows.GetFileInformationByHandle(h, &info) != nil {
+		valid := windows.GetFileInformationByHandle(h, &info) == nil
+		if valid {
+			size := uint64(info.FileSizeHigh)<<32 | uint64(info.FileSizeLow)
+			valid = expected.SizeBytes >= 0 && size == uint64(expected.SizeBytes) && info.NumberOfLinks == 1
+		}
+		if valid {
+			s.completed[key] = stagedObjectIdentity(info)
+		}
+		_ = windows.CloseHandle(h)
+		closeParents()
+		if !valid {
 			return ErrInvalidStaging
 		}
-		size := uint64(info.FileSizeHigh)<<32 | uint64(info.FileSizeLow)
-		if expected.SizeBytes < 0 || size != uint64(expected.SizeBytes) || info.NumberOfLinks != 1 {
-			return ErrInvalidStaging
-		}
-		s.completed[key] = stagedObjectIdentity(info)
 		return nil
 	})
 	if err != nil || len(seen) != len(s.allowed) {
@@ -128,13 +136,15 @@ func (s *ReceiveStage) AuditStagedPayload() error {
 		if err != nil {
 			return ErrInvalidStaging
 		}
-		defer closeParents()
 		h, err := openStagedRoot(parent, parts[len(parts)-1], expected.Directory, s.ownership.Stage.VolumeSerial)
 		if err != nil {
+			closeParents()
 			return ErrInvalidStaging
 		}
-		defer windows.CloseHandle(h)
-		if !s.matchesStagedObject(h, expected) {
+		matched := s.matchesStagedObject(h, expected)
+		_ = windows.CloseHandle(h)
+		closeParents()
+		if !matched {
 			return ErrInvalidStaging
 		}
 		return nil
