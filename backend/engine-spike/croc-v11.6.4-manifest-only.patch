@@ -1,5 +1,5 @@
 diff --git a/src/croc/croc.go b/src/croc/croc.go
-index 86724c0..0255e7b 100644
+index 86724c0..bb9a046 100644
 --- a/src/croc/croc.go
 +++ b/src/croc/croc.go
 @@ -189,6 +189,8 @@ type SimpleMessage struct {
@@ -11,7 +11,20 @@ index 86724c0..0255e7b 100644
  	receiveChoices                  map[int]bool
  	bundleCommitted                 map[string]FileInfo
  	bundles                         bundleClientState
-@@ -2577,6 +2579,25 @@ func (c *Client) processMessageFileInfo(m message.Message) (done bool, err error
+@@ -2039,8 +2041,10 @@ func (c *Client) Receive() (err error) {
+ 	defer c.stop.Cancel()
+ 	defer c.closeTailcatBundle()
+ 	defer c.clearReceiveStatus()
+-	if _, err = c.receiveFilesystem(); err != nil {
+-		return err
++	if c.manifestOnly == nil {
++		if _, err = c.receiveFilesystem(); err != nil {
++			return err
++		}
+ 	}
+ 	defer c.closeReceiveFilesystem()
+ 	// recipient will look for peers first
+@@ -2577,6 +2581,25 @@ func (c *Client) processMessageFileInfo(m message.Message) (done bool, err error
  }
  
  func (c *Client) processSenderInfo(senderInfo SenderInfo) (done bool, err error) {
