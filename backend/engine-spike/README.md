@@ -34,8 +34,8 @@ Build script cũng chạy worker tests từ checkout Croc sạch trước khi t�
 
 ## Việc backend còn thiếu
 
-- Khôi phục stage có journal sau crash. Publish thành công xóa stage và journal. Nếu cleanup lỗi, backend đặt `cleanupPending` và giữ Coordinator bận trong tiến trình hiện tại. Journal chưa lưu đích nên lần khởi động mới chưa thể khôi phục stage.
-- Tách timeout chuẩn bị, chờ peer và payload không tiến triển theo kế hoạch. Worker hiện có deadline tổng ba phút; không phát tiến độ byte từ engine.
+- Backend lưu đích nhận trong journal cục bộ có DACL riêng. Recovery kiểm marker và identity trước khi xóa stage còn lại. Test NTFS dừng tiến trình con đột ngột; cần nghiệm thu thêm khi mở app sau reboot Windows. Mục đã publish không bị rollback; journal sai hoặc đích offline chặn engine.
+- Timeout riêng cho chuẩn bị, chờ peer và payload không tiến triển theo kế hoạch. Worker hiện có deadline tổng ba phút; không phát tiến độ byte từ engine.
 - Xác minh tuyến relay công cộng trên hai máy và xác minh gói Wails cuối dùng đúng worker đã ghim.
 
 Vì vậy, backend đã có truyền payload qua worker và đã qua loopback Windows; backend chưa đạt toàn bộ tiêu chí nghiệm thu MVP.

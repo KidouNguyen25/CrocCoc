@@ -20,16 +20,16 @@ import (
 
 const stagePrefix = ".croccoc-stage-"
 
-// StageOwnership is the durable, secret-free recovery anchor for one stage.
-// The journal by itself never authorizes deletion: recovery must verify
-// both the marker nonce and native directory identities before touching data.
+// StageOwnership is the durable local recovery record for one stage.
+// Recovery verifies the marker and native identities before deleting data.
 type StageOwnership struct {
-	StageName   string            `json:"stageName"`
-	MarkerNonce string            `json:"markerNonce"`
-	Destination DirectoryIdentity `json:"destination"`
-	Stage       DirectoryIdentity `json:"stage"`
-	Status      string            `json:"status"`
-	CreatedAt   time.Time         `json:"createdAt"`
+	StageName       string            `json:"stageName"`
+	MarkerNonce     string            `json:"markerNonce"`
+	DestinationPath string            `json:"destinationPath"`
+	Destination     DirectoryIdentity `json:"destination"`
+	Stage           DirectoryIdentity `json:"stage"`
+	Status          string            `json:"status"`
+	CreatedAt       time.Time         `json:"createdAt"`
 }
 
 // ReceiveStage keeps handles for a uniquely created same-volume directory.
@@ -39,6 +39,8 @@ type ReceiveStage struct {
 	StageName        string
 	stage            windows.Handle
 	payload          windows.Handle
+	journalLock      windows.Handle
+	journalLockPath  string
 	journalPath      string
 	ownership        StageOwnership
 	mu               sync.Mutex
@@ -77,20 +79,41 @@ func (s *ReceiveStage) Close() error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.closeHandlesLocked()
+	if err := s.closeHandlesLocked(); err != nil {
+		return ErrUnsafeStorage
+	}
+	return s.closeJournalLockLocked()
 }
 
 func (s *ReceiveStage) closeHandlesLocked() error {
 	var failed bool
 	if s.payload != 0 {
-		failed = windows.CloseHandle(s.payload) != nil
-		s.payload = 0
+		if windows.CloseHandle(s.payload) == nil {
+			s.payload = 0
+		} else {
+			failed = true
+		}
 	}
 	if s.stage != 0 {
-		failed = windows.CloseHandle(s.stage) != nil || failed
-		s.stage = 0
+		if windows.CloseHandle(s.stage) == nil {
+			s.stage = 0
+		} else {
+			failed = true
+		}
 	}
 	if failed {
+		return ErrUnsafeStorage
+	}
+	return nil
+}
+
+func (s *ReceiveStage) closeJournalLockLocked() error {
+	if s.journalLock == 0 {
+		return nil
+	}
+	handle := s.journalLock
+	s.journalLock = 0
+	if windows.CloseHandle(handle) != nil {
 		return ErrUnsafeStorage
 	}
 	return nil
@@ -140,10 +163,14 @@ func prepareReceiveStageAt(lease *DestinationLease, entries []ManifestEntry, jou
 		entry.Path = strings.ReplaceAll(entry.Path, "\\", "/")
 		allowed[strings.ToUpper(entry.Path)] = entry
 	}
+	journalCommitted := false
 	stage := &ReceiveStage{allowed: allowed, completed: make(map[string]DirectoryIdentity), destinationPath: lease.path, manifestDigest: fingerprintManifest(entries)}
 	defer func() {
 		if err != nil {
 			_ = stage.Close()
+			if !journalCommitted && stage.journalLockPath != "" {
+				_ = os.Remove(stage.journalLockPath)
+			}
 		}
 	}()
 	var stageID, marker [16]byte
@@ -177,17 +204,24 @@ func prepareReceiveStageAt(lease *DestinationLease, entries []ManifestEntry, jou
 		return nil, err
 	}
 	stage.ownership = StageOwnership{
-		StageName:   stage.StageName,
-		MarkerNonce: nonce,
-		Destination: lease.id,
-		Stage:       stageIdentity,
-		Status:      "prepared",
-		CreatedAt:   time.Now().UTC(),
+		StageName:       stage.StageName,
+		MarkerNonce:     nonce,
+		DestinationPath: lease.path,
+		Destination:     lease.id,
+		Stage:           stageIdentity,
+		Status:          "prepared",
+		CreatedAt:       time.Now().UTC(),
 	}
-	if err := os.MkdirAll(journalDir, 0700); err != nil {
+	if err := ensurePrivateStageJournalDirectory(journalDir); err != nil {
 		return nil, ErrUnsafeStorage
 	}
-	stage.journalPath = filepath.Join(journalDir, hex.EncodeToString(stageID[:])+".json")
+	journalID := hex.EncodeToString(stageID[:])
+	stage.journalPath = filepath.Join(journalDir, journalID+".json")
+	stage.journalLockPath = filepath.Join(journalDir, journalID+".lock")
+	stage.journalLock, err = createStageJournalLock(stage.journalLockPath)
+	if err != nil {
+		return nil, ErrUnsafeStorage
+	}
 	journal, err := os.OpenFile(stage.journalPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
 		return nil, ErrUnsafeStorage
@@ -208,8 +242,31 @@ func prepareReceiveStageAt(lease *DestinationLease, entries []ManifestEntry, jou
 	if err = journal.Close(); err != nil {
 		return nil, ErrUnsafeStorage
 	}
+	journalCommitted = true
 	// Native payload writing still requires a separately validated writer.
 	return stage, nil
+}
+
+func createStageJournalLock(path string) (windows.Handle, error) {
+	ptr, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return 0, ErrUnsafeStorage
+	}
+	handle, err := windows.CreateFile(ptr,
+		windows.GENERIC_READ|windows.GENERIC_WRITE,
+		0, nil, windows.CREATE_NEW,
+		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return 0, ErrUnsafeStorage
+	}
+	var info windows.ByHandleFileInformation
+	if windows.GetFileInformationByHandle(handle, &info) != nil ||
+		info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 ||
+		info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		_ = windows.CloseHandle(handle)
+		return 0, ErrUnsafeStorage
+	}
+	return handle, nil
 }
 
 func createStageMarker(parent windows.Handle, nonce string) error {

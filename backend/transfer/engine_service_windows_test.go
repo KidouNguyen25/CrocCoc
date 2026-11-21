@@ -53,6 +53,19 @@ func TestReceiveFailureWithoutOwnedStageReleasesService(t *testing.T) {
 	}
 }
 
+func TestRecoveryPendingKeepsEngineUnavailable(t *testing.T) {
+	service := &engineService{recoveryErr: ErrRecoveryPending}
+	if info := service.GetCrocInfo(); info.Available || info.Message != ErrRecoveryPending.Error() {
+		t.Fatalf("recovery failure did not disable engine: %+v", info)
+	}
+	if _, err := service.StartSend([]string{"source.txt"}); !errors.Is(err, ErrRecoveryPending) {
+		t.Fatalf("send ignored pending recovery: %v", err)
+	}
+	if _, err := service.StartReceive("code", "output"); !errors.Is(err, ErrRecoveryPending) {
+		t.Fatalf("receive ignored pending recovery: %v", err)
+	}
+}
+
 func TestPinWorkerExecutableLocksVerifiedFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "worker.exe")
 	contents := []byte("pinned worker test")

@@ -109,6 +109,10 @@ func cleanupPublishedReceiveStage(lease *DestinationLease, stage *ReceiveStage) 
 	if err := os.Remove(stage.journalPath); err != nil {
 		return stageCleanupError("remove ownership journal")
 	}
+	if err := stage.closeJournalLockLocked(); err != nil {
+		return stageCleanupError("release ownership lock")
+	}
+	_ = os.Remove(stage.journalLockPath)
 	return nil
 }
 
@@ -118,11 +122,11 @@ func stageCleanupError(reason string) error {
 
 func verifyStageJournal(stage *ReceiveStage) error {
 	info, err := os.Lstat(stage.journalPath)
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() > 8192 {
 		return ErrStageCleanup
 	}
 	data, err := os.ReadFile(stage.journalPath)
-	if err != nil {
+	if err != nil || len(data) > 8192 {
 		return ErrStageCleanup
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))

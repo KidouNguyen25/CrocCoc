@@ -27,6 +27,7 @@ type engineService struct {
 	cfg         EngineServiceConfig
 	worker      *WorkerClient
 	workerPin   *SendSourceLease
+	recoveryErr error
 	coordinator Coordinator
 
 	mu       sync.Mutex
@@ -37,24 +38,38 @@ type engineService struct {
 // NewEngineService creates the Windows backend. It reports unavailable until
 // worker path, relay address and relay password are configured.
 func NewEngineService(config EngineServiceConfig) EngineController {
-	workerPin, _ := pinWorkerExecutable(config.WorkerPath, PinnedWorkerSHA256)
+	recoveryErr := recoverOwnedReceiveStages()
+	var workerPin *SendSourceLease
+	if recoveryErr == nil {
+		workerPin, _ = pinWorkerExecutable(config.WorkerPath, PinnedWorkerSHA256)
+	}
 	return &engineService{
 		cfg: config, worker: NewWorkerClient(config.WorkerPath),
-		workerPin: workerPin,
-		sessions:  make(map[string]*engineSession), sendCode: make(map[string]string),
+		workerPin: workerPin, recoveryErr: recoveryErr,
+		sessions: make(map[string]*engineSession), sendCode: make(map[string]string),
 	}
 }
 
 func (s *engineService) GetCrocInfo() CrocInfo {
+	if s != nil && s.recoveryErr != nil {
+		return CrocInfo{Available: false, Message: s.recoveryErr.Error()}
+	}
 	if s == nil || s.worker == nil || s.workerPin == nil || s.cfg.RelayAddress == "" || s.cfg.RelayPassword == "" {
 		return CrocInfo{Available: false, Message: ErrWorkerUnavailable.Error()}
 	}
 	return CrocInfo{Available: true, Version: PinnedCrocVersion}
 }
 
+func (s *engineService) unavailableError() error {
+	if s != nil && s.recoveryErr != nil {
+		return s.recoveryErr
+	}
+	return ErrWorkerUnavailable
+}
+
 func (s *engineService) StartSend(paths []string) (string, error) {
 	if s == nil || !s.GetCrocInfo().Available {
-		return "", ErrWorkerUnavailable
+		return "", s.unavailableError()
 	}
 	sources, manifest, err := AcquireSendSourceLease(paths)
 	if err != nil {
@@ -121,7 +136,7 @@ func (s *engineService) runSend(ctx context.Context, id, code string, paths []st
 
 func (s *engineService) StartReceive(code, outputDir string) (string, error) {
 	if s == nil || !s.GetCrocInfo().Available {
-		return "", ErrWorkerUnavailable
+		return "", s.unavailableError()
 	}
 	if strings.TrimSpace(code) == "" || strings.ContainsAny(code, "\r\n\x00") || outputDir == "" {
 		return "", ErrInvalidInput
