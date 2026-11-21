@@ -62,6 +62,7 @@ func (c *Coordinator) DecideReceive(
 		c.active.Revision++
 		c.offer = nil
 		c.decided = false
+		c.manifestDigest = [32]byte{}
 	}
 	return *c.active, true
 }
