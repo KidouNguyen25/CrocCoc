@@ -40,6 +40,25 @@ func (c *Coordinator) GetReceiveOffer(id string) (ReceiveOffer, bool) {
 	return c.offer.Clone(), true
 }
 
+// ExpireReceiveOffer closes a receiver offer after its decision deadline.
+// It wins the same cancellation gate as an explicit rejection and never
+// starts payload processing.
+func (c *Coordinator) ExpireReceiveOffer(id string, now time.Time) (SessionSnapshot, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.active == nil || c.active.TransferID != id ||
+		!c.receiving || c.active.State != AwaitingAcceptance ||
+		c.offer == nil || !c.offer.Expired(now) {
+		return SessionSnapshot{}, false
+	}
+	c.active.State = Cancelling
+	c.active.Revision++
+	c.offer = nil
+	c.decided = false
+	c.manifestDigest = [32]byte{}
+	return *c.active, true
+}
+
 // DecideReceive consumes an offer at most once. Accepting is only a recorded
 // user decision, NOT an authorization to fetch payload: the backend must
 // re-run native destination preflight and win the cancellation gate before
