@@ -107,6 +107,9 @@ func safeWindowsComponent(part string) bool {
 		}
 	}
 	base := strings.ToUpper(strings.SplitN(part, ".", 2)[0])
+	// Win32 trims trailing dots and spaces from the device-name stem before
+	// resolving it. Reject aliases such as "CON .txt" before native I/O.
+	base = strings.TrimRight(base, ". ")
 	switch base {
 	case "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$":
 		return false
