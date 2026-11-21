@@ -21,10 +21,11 @@ var (
 )
 
 type workerStartRequest struct {
-	Version       int    `json:"version"`
-	Code          string `json:"code"`
-	RelayAddress  string `json:"relayAddress"`
-	RelayPassword string `json:"relayPassword"`
+	Version         int    `json:"version"`
+	Code            string `json:"code"`
+	RelayAddress    string `json:"relayAddress"`
+	RelayPassword   string `json:"relayPassword"`
+	ContinuePayload bool   `json:"continuePayload,omitempty"`
 }
 
 type workerManifestFrame struct {
@@ -58,12 +59,35 @@ func (w *WorkerClient) ReceiveManifest(
 	code, relayAddress, relayPassword string,
 	decide func(ReceiveOffer) (bool, error),
 ) error {
+	return w.receiveManifest(ctx, "", false, code, relayAddress, relayPassword, decide)
+}
+
+// ReceiveAndContinue runs payload receive inside workingDir after the
+// callback accepts the frozen offer. The caller must provide a private stage
+// directory and audit it before publish.
+func (w *WorkerClient) ReceiveAndContinue(
+	ctx context.Context,
+	workingDir string,
+	code, relayAddress, relayPassword string,
+	decide func(ReceiveOffer) (bool, error),
+) error {
+	return w.receiveManifest(ctx, workingDir, true, code, relayAddress, relayPassword, decide)
+}
+
+func (w *WorkerClient) receiveManifest(
+	ctx context.Context,
+	workingDir string,
+	continuePayload bool,
+	code, relayAddress, relayPassword string,
+	decide func(ReceiveOffer) (bool, error),
+) error {
 	if w == nil || w.path == "" || ctx == nil || decide == nil ||
 		code == "" || relayPassword == "" ||
 		strings.ContainsAny(code, "\r\n\x00") || strings.ContainsAny(relayPassword, "\r\n\x00") {
 		return ErrWorkerProtocol
 	}
 	cmd := exec.CommandContext(ctx, w.path)
+	cmd.Dir = workingDir
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return ErrWorkerUnavailable
@@ -88,6 +112,7 @@ func (w *WorkerClient) ReceiveManifest(
 	request := workerStartRequest{
 		Version: workerWireVersion, Code: code,
 		RelayAddress: relayAddress, RelayPassword: relayPassword,
+		ContinuePayload: continuePayload,
 	}
 	if err := encoder.Encode(request); err != nil {
 		_ = cmd.Process.Kill()
@@ -135,10 +160,15 @@ func (w *WorkerClient) ReceiveManifest(
 	}
 	switch result.Status {
 	case "accepted_no_payload":
-		if !accept {
+		if !accept || continuePayload {
 			return ErrWorkerProtocol
 		}
 		return ErrPayloadNotIntegrated
+	case "completed":
+		if !accept || !continuePayload {
+			return ErrWorkerProtocol
+		}
+		return nil
 	case "rejected":
 		if accept {
 			return ErrWorkerProtocol

@@ -35,6 +35,7 @@ type startRequest struct {
 	Code          string `json:"code"`
 	RelayAddress  string `json:"relayAddress"`
 	RelayPassword string `json:"relayPassword"`
+	ContinuePayload bool   `json:"continuePayload,omitempty"`
 }
 
 type manifestResult struct {
@@ -117,7 +118,7 @@ func captureManifest(ctx context.Context, request startRequest, consume func(con
 	if err != nil {
 		return err
 	}
-	err = client.ReceiveManifest(func(ctx context.Context, info croc.SenderInfo) error {
+	manifestConsumer := func(ctx context.Context, info croc.SenderInfo) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -146,8 +147,19 @@ func captureManifest(ctx context.Context, request startRequest, consume func(con
 		if err != nil {
 			return err
 		}
-		return consume(ctx, manifest)
-	})
+		if err := consume(ctx, manifest); err != nil {
+			return err
+		}
+		if request.ContinuePayload {
+			return croc.ErrManifestContinue
+		}
+		return nil
+	}
+	if request.ContinuePayload {
+		err = client.ReceiveManifestAndContinue(manifestConsumer)
+	} else {
+		err = client.ReceiveManifest(manifestConsumer)
+	}
 	return err
 }
 
@@ -204,6 +216,8 @@ func run(ctx context.Context, in io.Reader, out io.Writer) int {
 			return awaitOfferDecision(ctx, reader, writer, entries)
 		})
 		switch {
+		case err == nil && request.ContinuePayload:
+			result.Status = "completed"
 		case ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
 			result.Status = "cancelled"
 		case errors.Is(err, croc.ErrManifestOnly):
@@ -224,7 +238,7 @@ func run(ctx context.Context, in io.Reader, out io.Writer) int {
 		return 1
 	}
 	switch result.Status {
-	case "accepted_no_payload", "rejected":
+	case "accepted_no_payload", "rejected", "completed":
 		return 0
 	default:
 		return 1
