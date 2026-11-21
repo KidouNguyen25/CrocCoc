@@ -23,20 +23,20 @@ import (
 	"github.com/schollz/croc/v11/src/tcp"
 )
 
-func TestStartRequestAcceptsOneBoundedLoopbackFrame(t *testing.T) {
-	valid := startRequest{Version: wireVersion, Code: "synthetic-code-fixture", RelayAddress: "127.0.0.1:2345", RelayPassword: "fixture"}
+func TestStartRequestAcceptsOneBoundedRelayFrame(t *testing.T) {
+	valid := startRequest{Version: wireVersion, Code: "synthetic-code-fixture", RelayAddress: "relay.example.test:2345", RelayPassword: "fixture"}
 	data, err := json.Marshal(valid)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, err := readRequest(bufio.NewReaderSize(bytes.NewReader(append(data, '\n')), requestLimit)); err != nil || got != valid {
+	if got, err := readRequest(bufio.NewReaderSize(bytes.NewReader(append(data, '\n')), requestLimit)); err != nil || !reflect.DeepEqual(got, valid) {
 		t.Fatal("valid request rejected")
 	}
 	for _, bad := range []string{
 		string(data),
 		string(data) + "{}\n",
-		strings.Replace(string(data), "127.0.0.1", "localhost", 1) + "\n",
-		strings.Replace(string(data), "127.0.0.1", "192.0.2.1", 1) + "\n",
+		strings.Replace(string(data), "relay.example.test", "bad/host", 1) + "\n",
+		strings.Replace(string(data), "relay.example.test", "0.0.0.0", 1) + "\n",
 		strings.Replace(string(data), "2345", "0", 1) + "\n",
 		strings.Repeat(" ", requestLimit) + "\n",
 	} {
