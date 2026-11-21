@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"log"
+	"os"
+	"strings"
 
 	"croccoc/backend/transfer"
 
@@ -15,6 +18,8 @@ import (
 var assets embed.FS
 
 func main() {
+	app := newApp(transfer.NewUnavailableService())
+	app.transfers = transfer.NewEngineService(engineServiceConfig(app.emitTransferUpdate))
 	if err := wails.Run(&options.App{
 		Title:     "CrocCoc",
 		Width:     920,
@@ -24,8 +29,24 @@ func main() {
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},
-		Bind: []interface{}{newApp(transfer.NewUnavailableService())},
+		OnStartup: func(ctx context.Context) {
+			app.setRuntimeContext(ctx)
+		},
+		Bind: []interface{}{app},
 	}); err != nil {
 		log.Fatal(err)
+	}
+}
+
+func engineServiceConfig(eventSink func(transfer.Update)) transfer.EngineServiceConfig {
+	workerPath := strings.TrimSpace(os.Getenv("CROCCOC_WORKER_PATH"))
+	relayAddress := strings.TrimSpace(os.Getenv("CROCCOC_RELAY_ADDRESS"))
+	relayPassword := os.Getenv("CROCCOC_RELAY_PASSWORD")
+	_ = os.Unsetenv("CROCCOC_RELAY_PASSWORD")
+	return transfer.EngineServiceConfig{
+		WorkerPath:    workerPath,
+		RelayAddress:  relayAddress,
+		RelayPassword: relayPassword,
+		EventSink:     eventSink,
 	}
 }
