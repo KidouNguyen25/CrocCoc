@@ -15,6 +15,8 @@ var ErrNotIntegrated = errors.New("Croc chưa được tích hợp trong bản k
 
 var ErrTransferFailed = errors.New("TRANSFER_FAILED: truyền tệp thất bại")
 
+var ErrPeerTimeout = errors.New("PEER_TIMEOUT: peer không phản hồi trong thời hạn")
+
 type State string
 
 const (

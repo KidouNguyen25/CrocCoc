@@ -286,8 +286,14 @@ func run(ctx context.Context, in io.Reader, out io.Writer) int {
 			result.Status = "completed"
 		case err == nil && request.ContinuePayload:
 			result.Status = "completed"
-		case ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
+		case errors.Is(err, context.DeadlineExceeded):
+			result.Status = "timeout"
+		case ctx.Err() != nil || errors.Is(err, context.Canceled):
 			result.Status = "cancelled"
+		case errors.Is(err, transfer.ErrSourceUnavailable):
+			result.Status = "source_unavailable"
+		case errors.Is(err, transfer.ErrInvalidInput):
+			result.Status = "invalid_input"
 		case errors.Is(err, croc.ErrManifestOnly):
 			result.Status = "accepted_no_payload"
 		case errors.Is(err, errOfferRejected):

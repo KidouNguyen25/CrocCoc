@@ -262,6 +262,12 @@ func workerStatusError(status string) error {
 		return ErrUnsafeOffer
 	case "resource_limit":
 		return ErrResourceLimit
+	case "source_unavailable":
+		return ErrSourceUnavailable
+	case "invalid_input":
+		return ErrInvalidInput
+	case "timeout":
+		return ErrPeerTimeout
 	case "metadata_failed", "cancelled":
 		return ErrTransferFailed
 	default:
