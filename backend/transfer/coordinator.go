@@ -12,9 +12,11 @@ var ErrBusy = errors.New("BUSY: đang có phiên truyền chưa giải phóng t�
 // SessionSnapshot is an immutable copy of a native session's position.
 // Event publication and the API wire are integrated separately.
 type SessionSnapshot struct {
-	TransferID string `json:"transferID"`
-	Revision   uint64 `json:"revision"`
-	State      State  `json:"state"`
+	TransferID     string `json:"transferID"`
+	Revision       uint64 `json:"revision"`
+	State          State  `json:"state"`
+	PartialOutput  bool   `json:"partialOutput,omitempty"`
+	CleanupPending bool   `json:"cleanupPending,omitempty"`
 }
 
 // Coordinator arbitrates transitions and cancellation under one short lock.
@@ -81,6 +83,22 @@ func (c *Coordinator) Advance(id string, next State) (SessionSnapshot, bool) {
 		c.offer = nil
 		c.decided = false
 		c.manifestDigest = [32]byte{}
+	}
+	return *c.active, true
+}
+
+// SetTerminalFlags records whether published output is partial or owned
+// staging still needs recovery. Changing terminal details advances revision.
+func (c *Coordinator) SetTerminalFlags(id string, partialOutput, cleanupPending bool) (SessionSnapshot, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.active == nil || c.active.TransferID != id || !IsTerminal(c.active.State) {
+		return SessionSnapshot{}, false
+	}
+	if c.active.PartialOutput != partialOutput || c.active.CleanupPending != cleanupPending {
+		c.active.PartialOutput = partialOutput
+		c.active.CleanupPending = cleanupPending
+		c.active.Revision++
 	}
 	return *c.active, true
 }

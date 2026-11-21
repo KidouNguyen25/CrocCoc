@@ -151,6 +151,7 @@ func (s *engineService) StartReceive(code, outputDir string) (string, error) {
 }
 
 func (s *engineService) runReceive(ctx context.Context, session *engineSession, code, outputDir string) {
+	activationAttempted := false
 	err := s.worker.ReceiveAndContinue(ctx, "", code, s.cfg.RelayAddress, s.cfg.RelayPassword,
 		func(offer ReceiveOffer) (bool, string, error) {
 			pending, snapshot, _, err := presentNativeReceiveOfferWithID(&s.coordinator, session.id, outputDir, offerToManifest(offer), offer.OfferID)
@@ -166,12 +167,11 @@ func (s *engineService) runReceive(ctx context.Context, session *engineSession, 
 			select {
 			case decision := <-session.decision:
 				if !decision.accept {
-					_ = pending.Close()
 					return false, "", nil
 				}
+				activationAttempted = true
 				stage, active, err := pending.activate(ctx)
 				if err != nil {
-					_ = pending.Close()
 					return false, "", err
 				}
 				s.mu.Lock()
@@ -181,10 +181,8 @@ func (s *engineService) runReceive(ctx context.Context, session *engineSession, 
 				return true, stage.PayloadPath(), nil
 			case <-timer.C:
 				s.coordinator.ExpireReceiveOffer(session.id, time.Now())
-				_ = pending.Close()
 				return false, "", nil
 			case <-ctx.Done():
-				_ = pending.Close()
 				return false, "", ctx.Err()
 			}
 		})
@@ -196,37 +194,33 @@ func (s *engineService) runReceive(ctx context.Context, session *engineSession, 
 		if adoptErr := stage.AdoptEnginePayload(); adoptErr != nil {
 			_ = stage.Close()
 			_ = pending.Close()
-			s.failSession(session.id, adoptErr)
-			s.releaseSession(session.id)
+			s.finishReceiveSession(session.id, adoptErr, false, true)
 			return
 		}
 		final, result, finalErr := FinalizeNativeReceive(&s.coordinator, session.id, pending.lease, stage, pending.entries)
 		if finalErr != nil {
 			_ = stage.Close()
 			_ = pending.Close()
-			s.failSession(session.id, finalErr)
+			s.finishReceiveSession(session.id, finalErr, result.Partial, true)
 		} else {
 			s.emit(final, "", "")
 			_ = result
+			s.releaseSession(session.id)
 		}
-	} else if err == nil {
-		if snapshot, ok := s.coordinator.Snapshot(session.id); ok && snapshot.State == Cancelling {
-			if cancelled, advanced := s.coordinator.Advance(session.id, Cancelled); advanced {
-				s.emit(cancelled, "", "")
-			}
-		} else {
-			s.failSession(session.id, ErrWorkerProtocol)
-		}
-	} else {
-		if pending != nil {
-			_ = pending.Close()
-		}
-		if stage != nil {
-			_ = stage.Close()
-		}
-		s.failSession(session.id, err)
+		return
 	}
-	s.releaseSession(session.id)
+	cleanupPending := activationAttempted || stage != nil
+	if pending != nil && pending.Close() != nil {
+		cleanupPending = true
+	}
+	if err == nil {
+		if snapshot, ok := s.coordinator.Snapshot(session.id); ok && snapshot.State == Cancelling {
+			s.finishReceiveSession(session.id, nil, false, cleanupPending)
+			return
+		}
+		err = ErrWorkerProtocol
+	}
+	s.finishReceiveSession(session.id, err, false, cleanupPending)
 }
 
 func offerToManifest(offer ReceiveOffer) []ManifestEntry {
@@ -320,8 +314,44 @@ func (s *engineService) failSession(id string, cause error) {
 	}
 }
 
+func (s *engineService) finishReceiveSession(id string, cause error, partialOutput, cleanupPending bool) {
+	snapshot, ok := s.coordinator.Snapshot(id)
+	if !ok {
+		return
+	}
+	if !IsTerminal(snapshot.State) {
+		next := Failed
+		if snapshot.State == Cancelling {
+			next = Cancelled
+		}
+		if advanced, changed := s.coordinator.Advance(id, next); changed {
+			snapshot = advanced
+		}
+	}
+	if !IsTerminal(snapshot.State) {
+		return
+	}
+	if snapshot.State == Failed && cause == nil {
+		cause = ErrTransferFailed
+	}
+	if updated, changed := s.coordinator.SetTerminalFlags(id, partialOutput, cleanupPending); changed {
+		snapshot = updated
+	}
+	if snapshot.State == Failed {
+		s.emitFailure(snapshot, cause)
+	} else {
+		s.emit(snapshot, "", "")
+	}
+	if !cleanupPending {
+		s.releaseSession(id)
+	}
+}
+
 func (s *engineService) releaseSession(id string) {
 	if snapshot, ok := s.coordinator.Snapshot(id); ok && IsTerminal(snapshot.State) {
+		if snapshot.CleanupPending {
+			return
+		}
 		_ = s.coordinator.Release(id)
 	}
 	s.mu.Lock()
@@ -335,7 +365,8 @@ func (s *engineService) emit(snapshot SessionSnapshot, message, code string) {
 		return
 	}
 	s.cfg.EventSink(Update{TransferID: snapshot.TransferID, State: snapshot.State,
-		Revision: snapshot.Revision, Message: message, ConnectionCode: code})
+		Revision: snapshot.Revision, Message: message, ConnectionCode: code,
+		PartialOutput: snapshot.PartialOutput, CleanupPending: snapshot.CleanupPending})
 }
 
 func (s *engineService) emitOffer(snapshot SessionSnapshot, offer ReceiveOffer) {
@@ -352,5 +383,6 @@ func (s *engineService) emitFailure(snapshot SessionSnapshot, cause error) {
 		return
 	}
 	s.cfg.EventSink(Update{TransferID: snapshot.TransferID, Revision: snapshot.Revision,
-		State: snapshot.State, Error: transferError(cause)})
+		State: snapshot.State, Error: transferError(cause),
+		PartialOutput: snapshot.PartialOutput, CleanupPending: snapshot.CleanupPending})
 }
