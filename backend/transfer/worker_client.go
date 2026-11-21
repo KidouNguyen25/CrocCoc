@@ -15,8 +15,9 @@ import (
 const workerWireVersion = 2
 
 var (
-	ErrWorkerUnavailable = errors.New("ENGINE_UNAVAILABLE: không thể khởi chạy engine")
-	ErrWorkerProtocol    = errors.New("ENGINE_FAILED: engine trả giao thức không hợp lệ")
+	ErrWorkerUnavailable     = errors.New("ENGINE_UNAVAILABLE: không thể khởi chạy engine")
+	ErrWorkerProtocol        = errors.New("ENGINE_FAILED: engine trả giao thức không hợp lệ")
+	ErrPayloadNotIntegrated  = errors.New("ENGINE_UNAVAILABLE: engine chưa hỗ trợ payload")
 )
 
 type workerStartRequest struct {
@@ -137,7 +138,7 @@ func (w *WorkerClient) ReceiveManifest(
 		if !accept {
 			return ErrWorkerProtocol
 		}
-		return nil
+		return ErrPayloadNotIntegrated
 	case "rejected":
 		if accept {
 			return ErrWorkerProtocol
