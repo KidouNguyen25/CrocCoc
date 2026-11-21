@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -31,11 +32,13 @@ const (
 )
 
 type startRequest struct {
-	Version       int    `json:"version"`
-	Code          string `json:"code"`
-	RelayAddress  string `json:"relayAddress"`
-	RelayPassword string `json:"relayPassword"`
-	ContinuePayload bool   `json:"continuePayload,omitempty"`
+	Version         int      `json:"version"`
+	Mode            string   `json:"mode,omitempty"`
+	Code            string   `json:"code"`
+	RelayAddress    string   `json:"relayAddress"`
+	RelayPassword   string   `json:"relayPassword"`
+	ContinuePayload bool     `json:"continuePayload,omitempty"`
+	Paths           []string `json:"paths,omitempty"`
 }
 
 type manifestResult struct {
@@ -46,9 +49,10 @@ type manifestResult struct {
 }
 
 type decisionRequest struct {
-	Version int    `json:"version"`
-	OfferID string `json:"offerID"`
-	Accept  *bool  `json:"accept"`
+	Version    int    `json:"version"`
+	OfferID    string `json:"offerID"`
+	Accept     *bool  `json:"accept"`
+	PayloadDir string `json:"payloadDir,omitempty"`
 }
 
 var (
@@ -84,7 +88,9 @@ func readRequest(r *bufio.Reader) (startRequest, error) {
 	if request.Version != wireVersion ||
 		request.Code == "" || len(request.Code) > 128 || strings.ContainsAny(request.Code, "\r\n\x00") ||
 		request.RelayPassword == "" || len(request.RelayPassword) > 128 ||
-		!isLoopbackRelay(request.RelayAddress) {
+		!isLoopbackRelay(request.RelayAddress) ||
+		(request.Mode != "" && request.Mode != "send") ||
+		(request.Mode == "send" && (len(request.Paths) == 0 || request.ContinuePayload)) {
 		return startRequest{}, errInvalidRequest
 	}
 	return request, nil
@@ -113,6 +119,9 @@ func captureManifest(ctx context.Context, request startRequest, consume func(con
 		DisableLocal:     true,
 		DisableClipboard: true,
 		NoUpdateCheck:    true,
+		NoPrompt:         true,
+		Overwrite:        false,
+		Rename:           false,
 		Curve:            "siec",
 	})
 	if err != nil {
@@ -163,33 +172,62 @@ func captureManifest(ctx context.Context, request startRequest, consume func(con
 	return err
 }
 
+func runSend(ctx context.Context, request startRequest) error {
+	if _, err := transfer.InspectSendSources(request.Paths); err != nil {
+		return err
+	}
+	files, folders, count, err := croc.GetFilesInfo(request.Paths, false, false, nil)
+	if err != nil {
+		return err
+	}
+	client, err := croc.NewCtx(ctx, croc.Options{
+		IsSender: true, SharedSecret: request.Code,
+		RelayAddress: request.RelayAddress, RelayPassword: request.RelayPassword,
+		DisableLocal: true, DisableClipboard: true, NoUpdateCheck: true,
+		Curve: "siec", NoPrompt: true, Quiet: true,
+	})
+	if err != nil {
+		return err
+	}
+	return client.Send(files, folders, count)
+}
+
 // waitDecision is the only reader for the second frame. If the deadline wins
 // against a blocked anonymous pipe read, run ends and main exits the process.
 func waitDecision(ctx context.Context, in *bufio.Reader, offerID string) error {
-	done := make(chan error, 1)
+	_, err := waitDecisionRequest(ctx, in, offerID)
+	return err
+}
+
+func waitDecisionRequest(ctx context.Context, in *bufio.Reader, offerID string) (decisionRequest, error) {
+	type decisionResult struct {
+		request decisionRequest
+		err     error
+	}
+	done := make(chan decisionResult, 1)
 	go func() {
 		var d decisionRequest
 		switch {
 		case readFrame(in, &d) != nil || d.Version != wireVersion || d.OfferID != offerID || d.Accept == nil:
-			done <- errInvalidDecision
+			done <- decisionResult{err: errInvalidDecision}
 		case !*d.Accept:
-			done <- errOfferRejected
+			done <- decisionResult{request: d, err: errOfferRejected}
 		default:
-			done <- nil
+			done <- decisionResult{request: d}
 		}
 	}()
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
-	case err := <-done:
+		return decisionRequest{}, ctx.Err()
+	case result := <-done:
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return decisionRequest{}, ctx.Err()
 		}
-		return err
+		return result.request, result.err
 	}
 }
 
-func awaitOfferDecision(ctx context.Context, in *bufio.Reader, out *json.Encoder, entries []transfer.ManifestEntry) error {
+func awaitOfferDecision(ctx context.Context, in *bufio.Reader, out *json.Encoder, entries []transfer.ManifestEntry, continuePayload bool) error {
 	var nonce [16]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return err
@@ -203,7 +241,31 @@ func awaitOfferDecision(ctx context.Context, in *bufio.Reader, out *json.Encoder
 	if err := out.Encode(manifestResult{Version: wireVersion, Status: "awaiting_decision", OfferID: offerID, Entries: entries}); err != nil {
 		return errControlWrite
 	}
-	return waitDecision(decisionCtx, in, offerID)
+	decision, err := waitDecisionRequest(decisionCtx, in, offerID)
+	if err != nil {
+		return err
+	}
+	if !continuePayload {
+		if decision.PayloadDir != "" {
+			return errInvalidDecision
+		}
+		return nil
+	}
+	if decision.PayloadDir == "" || strings.ContainsAny(decision.PayloadDir, "\x00\r\n") {
+		return errInvalidDecision
+	}
+	payloadDir, err := filepath.Abs(decision.PayloadDir)
+	if err != nil || !filepath.IsAbs(payloadDir) {
+		return errInvalidDecision
+	}
+	info, err := os.Stat(payloadDir)
+	if err != nil || !info.IsDir() {
+		return errInvalidDecision
+	}
+	if err := os.Chdir(payloadDir); err != nil {
+		return errInvalidDecision
+	}
+	return nil
 }
 
 func run(ctx context.Context, in io.Reader, out io.Writer) int {
@@ -212,10 +274,16 @@ func run(ctx context.Context, in io.Reader, out io.Writer) int {
 	result := manifestResult{Version: wireVersion, Status: "invalid_request"}
 	request, err := readRequest(reader)
 	if err == nil {
-		err = captureManifest(ctx, request, func(ctx context.Context, entries []transfer.ManifestEntry) error {
-			return awaitOfferDecision(ctx, reader, writer, entries)
-		})
+		if request.Mode == "send" {
+			err = runSend(ctx, request)
+		} else {
+			err = captureManifest(ctx, request, func(ctx context.Context, entries []transfer.ManifestEntry) error {
+				return awaitOfferDecision(ctx, reader, writer, entries, request.ContinuePayload)
+			})
+		}
 		switch {
+		case err == nil && request.Mode == "send":
+			result.Status = "completed"
 		case err == nil && request.ContinuePayload:
 			result.Status = "completed"
 		case ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):

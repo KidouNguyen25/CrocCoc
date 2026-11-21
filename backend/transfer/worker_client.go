@@ -15,17 +15,19 @@ import (
 const workerWireVersion = 2
 
 var (
-	ErrWorkerUnavailable     = errors.New("ENGINE_UNAVAILABLE: không thể khởi chạy engine")
-	ErrWorkerProtocol        = errors.New("ENGINE_FAILED: engine trả giao thức không hợp lệ")
-	ErrPayloadNotIntegrated  = errors.New("ENGINE_UNAVAILABLE: engine chưa hỗ trợ payload")
+	ErrWorkerUnavailable    = errors.New("ENGINE_UNAVAILABLE: không thể khởi chạy engine")
+	ErrWorkerProtocol       = errors.New("ENGINE_FAILED: engine trả giao thức không hợp lệ")
+	ErrPayloadNotIntegrated = errors.New("ENGINE_UNAVAILABLE: engine chưa hỗ trợ payload")
 )
 
 type workerStartRequest struct {
-	Version         int    `json:"version"`
-	Code            string `json:"code"`
-	RelayAddress    string `json:"relayAddress"`
-	RelayPassword   string `json:"relayPassword"`
-	ContinuePayload bool   `json:"continuePayload,omitempty"`
+	Version         int      `json:"version"`
+	Mode            string   `json:"mode,omitempty"`
+	Code            string   `json:"code"`
+	RelayAddress    string   `json:"relayAddress"`
+	RelayPassword   string   `json:"relayPassword"`
+	ContinuePayload bool     `json:"continuePayload,omitempty"`
+	Paths           []string `json:"paths,omitempty"`
 }
 
 type workerManifestFrame struct {
@@ -36,9 +38,10 @@ type workerManifestFrame struct {
 }
 
 type workerDecisionFrame struct {
-	Version int    `json:"version"`
-	OfferID string `json:"offerID"`
-	Accept  *bool  `json:"accept"`
+	Version    int    `json:"version"`
+	OfferID    string `json:"offerID"`
+	Accept     *bool  `json:"accept"`
+	PayloadDir string `json:"payloadDir,omitempty"`
 }
 
 // WorkerClient speaks to the private engine helper over stdin/stdout. The
@@ -57,7 +60,7 @@ func NewWorkerClient(path string) *WorkerClient {
 func (w *WorkerClient) ReceiveManifest(
 	ctx context.Context,
 	code, relayAddress, relayPassword string,
-	decide func(ReceiveOffer) (bool, error),
+	decide func(ReceiveOffer) (bool, string, error),
 ) error {
 	return w.receiveManifest(ctx, "", false, code, relayAddress, relayPassword, decide)
 }
@@ -69,9 +72,66 @@ func (w *WorkerClient) ReceiveAndContinue(
 	ctx context.Context,
 	workingDir string,
 	code, relayAddress, relayPassword string,
-	decide func(ReceiveOffer) (bool, error),
+	decide func(ReceiveOffer) (bool, string, error),
 ) error {
 	return w.receiveManifest(ctx, workingDir, true, code, relayAddress, relayPassword, decide)
+}
+
+// Send transfers validated source paths through private worker stdin. Paths
+// never enter argv or environment. The worker revalidates sources before it
+// opens Croc.
+func (w *WorkerClient) Send(
+	ctx context.Context,
+	code, relayAddress, relayPassword string,
+	paths []string,
+) error {
+	if w == nil || w.path == "" || ctx == nil || code == "" || relayPassword == "" ||
+		len(paths) == 0 || strings.ContainsAny(code, "\r\n\x00") ||
+		strings.ContainsAny(relayPassword, "\r\n\x00") {
+		return ErrWorkerProtocol
+	}
+	cmd := exec.CommandContext(ctx, w.path)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return ErrWorkerUnavailable
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		_ = stdin.Close()
+		return ErrWorkerUnavailable
+	}
+	cmd.Stderr = io.Discard
+	if err := cmd.Start(); err != nil {
+		_ = stdin.Close()
+		return ErrWorkerUnavailable
+	}
+	defer func() { _ = stdin.Close(); _ = stdout.Close() }()
+	if err := json.NewEncoder(stdin).Encode(workerStartRequest{
+		Version: workerWireVersion, Mode: "send", Code: code,
+		RelayAddress: relayAddress, RelayPassword: relayPassword, Paths: append([]string(nil), paths...),
+	}); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return ErrWorkerProtocol
+	}
+	reader := bufio.NewReaderSize(stdout, 8192)
+	var result workerManifestFrame
+	if err := readWorkerFrame(reader, &result, code, relayPassword); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return ErrWorkerProtocol
+	}
+	_ = stdin.Close()
+	if err := cmd.Wait(); err != nil && ctx.Err() == nil {
+		return ErrWorkerProtocol
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if result.Status != "completed" {
+		return ErrWorkerProtocol
+	}
+	return nil
 }
 
 func (w *WorkerClient) receiveManifest(
@@ -79,7 +139,7 @@ func (w *WorkerClient) receiveManifest(
 	workingDir string,
 	continuePayload bool,
 	code, relayAddress, relayPassword string,
-	decide func(ReceiveOffer) (bool, error),
+	decide func(ReceiveOffer) (bool, string, error),
 ) error {
 	if w == nil || w.path == "" || ctx == nil || decide == nil ||
 		code == "" || relayPassword == "" ||
@@ -87,7 +147,6 @@ func (w *WorkerClient) receiveManifest(
 		return ErrWorkerProtocol
 	}
 	cmd := exec.CommandContext(ctx, w.path)
-	cmd.Dir = workingDir
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return ErrWorkerUnavailable
@@ -136,11 +195,20 @@ func (w *WorkerClient) receiveManifest(
 		return err
 	}
 	offer.OfferID = offerFrame.OfferID
-	accept, err := decide(offer)
+	accept, payloadDir, err := decide(offer)
+	decisionErr := err
 	if err != nil {
 		accept = false
 	}
-	if err := encoder.Encode(workerDecisionFrame{Version: workerWireVersion, OfferID: offer.OfferID, Accept: &accept}); err != nil {
+	if continuePayload && accept && payloadDir == "" {
+		payloadDir = workingDir
+	}
+	if !continuePayload {
+		payloadDir = ""
+	}
+	if err := encoder.Encode(workerDecisionFrame{
+		Version: workerWireVersion, OfferID: offer.OfferID, Accept: &accept, PayloadDir: payloadDir,
+	}); err != nil {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 		return ErrWorkerProtocol
@@ -163,15 +231,24 @@ func (w *WorkerClient) receiveManifest(
 		if !accept || continuePayload {
 			return ErrWorkerProtocol
 		}
+		if decisionErr != nil {
+			return decisionErr
+		}
 		return ErrPayloadNotIntegrated
 	case "completed":
 		if !accept || !continuePayload {
 			return ErrWorkerProtocol
 		}
+		if decisionErr != nil {
+			return decisionErr
+		}
 		return nil
 	case "rejected":
 		if accept {
 			return ErrWorkerProtocol
+		}
+		if decisionErr != nil {
+			return decisionErr
 		}
 		return nil
 	default:
