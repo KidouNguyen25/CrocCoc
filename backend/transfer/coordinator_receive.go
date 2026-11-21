@@ -13,6 +13,29 @@ func (c *Coordinator) PresentReceiveOffer(
 	if err != nil {
 		return SessionSnapshot{}, ReceiveOffer{}, err
 	}
+	return c.presentReceiveOffer(id, entries, offer, now)
+}
+
+// PresentReceiveOfferWithID binds a validated engine offer to the coordinator
+// without replacing its opaque identifier. The ID must come from the private
+// worker frame and is never accepted from UI input.
+func (c *Coordinator) PresentReceiveOfferWithID(
+	id string, entries []ManifestEntry, offerID string, now time.Time,
+) (SessionSnapshot, ReceiveOffer, error) {
+	if offerID == "" {
+		return SessionSnapshot{}, ReceiveOffer{}, ErrUnsafeOffer
+	}
+	offer, err := PrepareReceiveOffer(entries, now)
+	if err != nil {
+		return SessionSnapshot{}, ReceiveOffer{}, err
+	}
+	offer.OfferID = offerID
+	return c.presentReceiveOffer(id, entries, offer, now)
+}
+
+func (c *Coordinator) presentReceiveOffer(
+	id string, entries []ManifestEntry, offer ReceiveOffer, now time.Time,
+) (SessionSnapshot, ReceiveOffer, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.active == nil || c.active.TransferID != id ||

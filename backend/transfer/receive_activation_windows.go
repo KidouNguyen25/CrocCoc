@@ -30,6 +30,10 @@ type nativeReceiveOffer struct {
 // or writing anything before user consent. It freezes a canonical copy of the
 // manifest so a caller cannot change paths or byte counts after review.
 func presentNativeReceiveOffer(c *Coordinator, id, destination string, entries []ManifestEntry) (*nativeReceiveOffer, SessionSnapshot, ReceiveOffer, error) {
+	return presentNativeReceiveOfferWithID(c, id, destination, entries, "")
+}
+
+func presentNativeReceiveOfferWithID(c *Coordinator, id, destination string, entries []ManifestEntry, offerID string) (*nativeReceiveOffer, SessionSnapshot, ReceiveOffer, error) {
 	if c == nil {
 		return nil, SessionSnapshot{}, ReceiveOffer{}, ErrBusy
 	}
@@ -41,7 +45,13 @@ func presentNativeReceiveOffer(c *Coordinator, id, destination string, entries [
 	if err != nil {
 		return nil, SessionSnapshot{}, ReceiveOffer{}, err
 	}
-	snapshot, offer, err := c.PresentReceiveOffer(id, frozen, time.Now())
+	var snapshot SessionSnapshot
+	var offer ReceiveOffer
+	if offerID == "" {
+		snapshot, offer, err = c.PresentReceiveOffer(id, frozen, time.Now())
+	} else {
+		snapshot, offer, err = c.PresentReceiveOfferWithID(id, frozen, offerID, time.Now())
+	}
 	if err != nil {
 		_ = lease.Close()
 		return nil, SessionSnapshot{}, ReceiveOffer{}, err

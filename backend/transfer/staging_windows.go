@@ -59,6 +59,16 @@ func (s *ReceiveStage) JournalPath() string {
 	return s.journalPath
 }
 
+// PayloadPath returns the private directory that the reviewed engine worker
+// may use for payload writes. The caller must retain the stage ownership lease
+// and audit this path before publication.
+func (s *ReceiveStage) PayloadPath() string {
+	if s == nil || s.StageName == "" || s.destinationPath == "" {
+		return ""
+	}
+	return filepath.Join(s.destinationPath, s.StageName, "payload")
+}
+
 // Close releases native handles without guessing whether it is safe to
 // remove stage data. Recovery/cleanup requires a separate verified operation.
 func (s *ReceiveStage) Close() error {

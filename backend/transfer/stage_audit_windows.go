@@ -13,6 +13,76 @@ import (
 
 var ErrInvalidStaging = errors.New("TRANSFER_FAILED: vùng nhận không khớp danh sách đã duyệt")
 
+// AdoptEnginePayload records identities for files written by the reviewed
+// engine worker. It does not trust worker metadata: every object is reopened
+// by handle, checked against the frozen manifest, and rejected on reparse or
+// size mismatch before publication can use it.
+func (s *ReceiveStage) AdoptEnginePayload() error {
+	if s == nil {
+		return ErrInvalidStaging
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stage == 0 || s.payload == 0 || !s.prepared || s.ownership.Status != "prepared" {
+		return ErrInvalidStaging
+	}
+	if err := s.verifyStagingIdentity(); err != nil {
+		return ErrInvalidStaging
+	}
+	directory := filepath.Join(s.destinationPath, s.StageName, "payload")
+	seen := make(map[string]bool, len(s.allowed))
+	err := filepath.WalkDir(directory, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return ErrInvalidStaging
+		}
+		if path == directory {
+			return nil
+		}
+		relative, err := filepath.Rel(directory, path)
+		if err != nil {
+			return ErrInvalidStaging
+		}
+		name := filepath.ToSlash(relative)
+		key := strings.ToUpper(name)
+		expected, ok := s.allowed[key]
+		if !ok || strings.ReplaceAll(expected.Path, "\\", "/") != name || seen[key] {
+			return ErrInvalidStaging
+		}
+		seen[key] = true
+		parts := strings.Split(name, "/")
+		parent, closeParents, err := s.openStageParent(parts[:len(parts)-1])
+		if err != nil {
+			return ErrInvalidStaging
+		}
+		defer closeParents()
+		h, err := openStagedRoot(parent, parts[len(parts)-1], expected.Directory, s.ownership.Stage.VolumeSerial)
+		if err != nil {
+			return ErrInvalidStaging
+		}
+		defer windows.CloseHandle(h)
+		if expected.Directory {
+			if actual, found := s.stageDirectories[expected.Path]; !found || actual != stagedIdentityFromHandle(h) {
+				return ErrInvalidStaging
+			}
+			return nil
+		}
+		var info windows.ByHandleFileInformation
+		if windows.GetFileInformationByHandle(h, &info) != nil {
+			return ErrInvalidStaging
+		}
+		size := uint64(info.FileSizeHigh)<<32 | uint64(info.FileSizeLow)
+		if expected.SizeBytes < 0 || size != uint64(expected.SizeBytes) || info.NumberOfLinks != 1 {
+			return ErrInvalidStaging
+		}
+		s.completed[key] = stagedObjectIdentity(info)
+		return nil
+	})
+	if err != nil || len(seen) != len(s.allowed) {
+		return ErrInvalidStaging
+	}
+	return nil
+}
+
 // AuditStagedPayload reads the stage created by our native writer and verifies
 // that its files, directories, sizes and identities match the staged objects.
 // A missing, partial, extra or reparse-point entry fails the audit.
@@ -129,4 +199,12 @@ func (s *ReceiveStage) matchesStagedObject(h windows.Handle, entry ManifestEntry
 	size := uint64(info.FileSizeHigh)<<32 | uint64(info.FileSizeLow)
 	return found && expected == id && entry.SizeBytes >= 0 &&
 		size == uint64(entry.SizeBytes) && info.NumberOfLinks == 1
+}
+
+func stagedIdentityFromHandle(h windows.Handle) DirectoryIdentity {
+	var info windows.ByHandleFileInformation
+	if windows.GetFileInformationByHandle(h, &info) != nil {
+		return DirectoryIdentity{}
+	}
+	return stagedObjectIdentity(info)
 }
