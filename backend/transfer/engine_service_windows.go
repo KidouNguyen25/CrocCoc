@@ -273,6 +273,10 @@ func (s *engineService) CancelTransfer(id string) (bool, error) {
 }
 
 func (s *engineService) GetSendCode(id string) (string, bool) {
+	snapshot, ok := s.coordinator.Snapshot(id)
+	if !ok || snapshot.State != WaitingForPeer {
+		return "", false
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	code, ok := s.sendCode[id]
