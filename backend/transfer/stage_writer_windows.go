@@ -200,7 +200,8 @@ func (s *ReceiveStage) writeStagePayload(ctx context.Context, entry ManifestEntr
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.payload == 0 || !s.prepared || entry.Directory || entry.SizeBytes < 0 ||
+	if s.payload == 0 || !s.prepared || s.ownership.Status != "prepared" ||
+		entry.Directory || entry.SizeBytes < 0 ||
 		entry.SizeBytes > MaxManifestBytes {
 		return ErrUnsafeStorage
 	}
