@@ -20,6 +20,7 @@ type EngineController interface {
 	Service
 	DecideReceive(transferID, offerID string, accept bool) (bool, error)
 	GetReceiveOffer(transferID string) (ReceiveOffer, bool)
+	GetTransferSnapshot(transferID string) (SessionSnapshot, bool)
 	GetSendCode(transferID string) (string, bool)
 }
 

@@ -4,7 +4,6 @@ package transfer
 
 import (
 	"context"
-	"errors"
 	"os"
 	"strconv"
 	"strings"
@@ -70,6 +69,8 @@ func (s *engineService) StartSend(paths []string) (string, error) {
 	}
 	waiting, ok := s.coordinator.Advance(started.TransferID, WaitingForPeer)
 	if !ok {
+		_, _ = s.coordinator.Advance(started.TransferID, Failed)
+		_ = s.coordinator.Release(started.TransferID)
 		return "", ErrWorkerProtocol
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -78,7 +79,7 @@ func (s *engineService) StartSend(paths []string) (string, error) {
 	s.sessions[session.id] = session
 	s.sendCode[session.id] = code
 	s.mu.Unlock()
-	s.emit(waiting, code, "")
+	s.emit(waiting, "", code)
 	go s.runSend(ctx, session.id, code, paths)
 	return session.id, nil
 }
@@ -108,12 +109,17 @@ func (s *engineService) StartReceive(code, outputDir string) (string, error) {
 	if strings.TrimSpace(code) == "" || strings.ContainsAny(code, "\r\n\x00") || outputDir == "" {
 		return "", ErrInvalidInput
 	}
+	if err := CheckReceiveDestinationEligibility(outputDir); err != nil {
+		return "", err
+	}
 	started, err := s.coordinator.BeginReceive()
 	if err != nil {
 		return "", err
 	}
 	waiting, ok := s.coordinator.Advance(started.TransferID, WaitingForPeer)
 	if !ok {
+		_, _ = s.coordinator.Advance(started.TransferID, Failed)
+		_ = s.coordinator.Release(started.TransferID)
 		return "", ErrWorkerProtocol
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -136,7 +142,7 @@ func (s *engineService) runReceive(ctx context.Context, session *engineSession, 
 			s.mu.Lock()
 			session.pending = pending
 			s.mu.Unlock()
-			s.emit(snapshot, "", offer.OfferID)
+			s.emitOffer(snapshot, offer)
 			timer := time.NewTimer(OfferDecisionTimeout)
 			defer timer.Stop()
 			select {
@@ -244,6 +250,10 @@ func (s *engineService) GetReceiveOffer(id string) (ReceiveOffer, bool) {
 	return s.coordinator.GetReceiveOffer(id)
 }
 
+func (s *engineService) GetTransferSnapshot(id string) (SessionSnapshot, bool) {
+	return s.coordinator.Snapshot(id)
+}
+
 func (s *engineService) CancelTransfer(id string) (bool, error) {
 	s.mu.Lock()
 	session := s.sessions[id]
@@ -280,7 +290,7 @@ func (s *engineService) failSession(id string, cause error) {
 		return
 	}
 	if snapshot, ok := s.coordinator.Advance(id, Failed); ok {
-		s.emit(snapshot, cause.Error(), "")
+		s.emitFailure(snapshot, cause)
 		return
 	}
 	if snapshot, ok := s.coordinator.Advance(id, Cancelled); ok {
@@ -303,5 +313,22 @@ func (s *engineService) emit(snapshot SessionSnapshot, message, code string) {
 		return
 	}
 	s.cfg.EventSink(Update{TransferID: snapshot.TransferID, State: snapshot.State,
-		Message: message, ConnectionCode: code})
+		Revision: snapshot.Revision, Message: message, ConnectionCode: code})
+}
+
+func (s *engineService) emitOffer(snapshot SessionSnapshot, offer ReceiveOffer) {
+	if s.cfg.EventSink == nil {
+		return
+	}
+	copyOffer := offer.Clone()
+	s.cfg.EventSink(Update{TransferID: snapshot.TransferID, Revision: snapshot.Revision,
+		State: snapshot.State, ReceiveOffer: &copyOffer})
+}
+
+func (s *engineService) emitFailure(snapshot SessionSnapshot, cause error) {
+	if s.cfg.EventSink == nil {
+		return
+	}
+	s.cfg.EventSink(Update{TransferID: snapshot.TransferID, Revision: snapshot.Revision,
+		State: snapshot.State, Error: transferError(cause)})
 }

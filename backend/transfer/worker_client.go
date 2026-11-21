@@ -129,7 +129,7 @@ func (w *WorkerClient) Send(
 		return ctx.Err()
 	}
 	if result.Status != "completed" {
-		return ErrWorkerProtocol
+		return workerStatusError(result.Status)
 	}
 	return nil
 }
@@ -251,6 +251,19 @@ func (w *WorkerClient) receiveManifest(
 			return decisionErr
 		}
 		return nil
+	default:
+		return workerStatusError(result.Status)
+	}
+}
+
+func workerStatusError(status string) error {
+	switch status {
+	case "unsafe_offer":
+		return ErrUnsafeOffer
+	case "resource_limit":
+		return ErrResourceLimit
+	case "metadata_failed", "cancelled":
+		return ErrTransferFailed
 	default:
 		return ErrWorkerProtocol
 	}

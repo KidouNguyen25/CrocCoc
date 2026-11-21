@@ -17,6 +17,10 @@ func (unavailableEngineController) GetReceiveOffer(string) (ReceiveOffer, bool) 
 	return ReceiveOffer{}, false
 }
 
+func (unavailableEngineController) GetTransferSnapshot(string) (SessionSnapshot, bool) {
+	return SessionSnapshot{}, false
+}
+
 func (unavailableEngineController) GetSendCode(string) (string, bool) {
 	return "", false
 }
