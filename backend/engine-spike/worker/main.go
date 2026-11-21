@@ -1,6 +1,6 @@
 //go:build croc_no_tailcat
 
-// This worker is a loopback-only protocol spike, not part of the desktop binaries.
+// This worker is a private protocol helper, not part of the desktop binaries.
 package main
 
 import (
@@ -88,7 +88,7 @@ func readRequest(r *bufio.Reader) (startRequest, error) {
 	if request.Version != wireVersion ||
 		request.Code == "" || len(request.Code) > 128 || strings.ContainsAny(request.Code, "\r\n\x00") ||
 		request.RelayPassword == "" || len(request.RelayPassword) > 128 ||
-		!isLoopbackRelay(request.RelayAddress) ||
+		!isRelayAddress(request.RelayAddress) ||
 		(request.Mode != "" && request.Mode != "send") ||
 		(request.Mode == "send" && (len(request.Paths) == 0 || request.ContinuePayload)) {
 		return startRequest{}, errInvalidRequest
@@ -96,17 +96,41 @@ func readRequest(r *bufio.Reader) (startRequest, error) {
 	return request, nil
 }
 
-func isLoopbackRelay(address string) bool {
+func isRelayAddress(address string) bool {
+	if address == "" || len(address) > 255 || strings.ContainsAny(address, "\r\n\x00") {
+		return false
+	}
 	host, port, err := net.SplitHostPort(address)
 	if err != nil {
 		return false
 	}
-	addr, err := netip.ParseAddr(host)
-	if err != nil || addr.Zone() != "" || !addr.IsLoopback() {
+	if addr, parseErr := netip.ParseAddr(host); parseErr == nil {
+		if addr.Zone() != "" || addr.IsUnspecified() || addr.IsMulticast() {
+			return false
+		}
+	} else if !validRelayHostname(host) {
 		return false
 	}
 	p, err := strconv.ParseUint(port, 10, 16)
 	return err == nil && p != 0
+}
+
+func validRelayHostname(host string) bool {
+	if host == "" || len(host) > 253 || strings.HasSuffix(host, ".") {
+		return false
+	}
+	for _, label := range strings.Split(host, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, r := range label {
+			if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') &&
+				(r < '0' || r > '9') && r != '-' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // captureManifest holds the authenticated receive callback open while consume
