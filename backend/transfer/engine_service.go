@@ -14,6 +14,15 @@ type EngineServiceConfig struct {
 	EventSink     func(Update)
 }
 
+// EngineController extends the bootstrap Service with receive consent and
+// sender-code reads required by the desktop host.
+type EngineController interface {
+	Service
+	DecideReceive(transferID, offerID string, accept bool) (bool, error)
+	GetReceiveOffer(transferID string) (ReceiveOffer, bool)
+	GetSendCode(transferID string) (string, bool)
+}
+
 func newConnectionCode() (string, error) {
 	var raw [16]byte
 	if _, err := rand.Read(raw[:]); err != nil {

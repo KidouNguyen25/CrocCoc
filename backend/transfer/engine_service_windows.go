@@ -36,7 +36,7 @@ type engineService struct {
 
 // NewEngineService creates the Windows backend. It reports unavailable until
 // worker path, relay address and relay password are configured.
-func NewEngineService(config EngineServiceConfig) Service {
+func NewEngineService(config EngineServiceConfig) EngineController {
 	return &engineService{
 		cfg: config, worker: NewWorkerClient(config.WorkerPath),
 		sessions: make(map[string]*engineSession), sendCode: make(map[string]string),
