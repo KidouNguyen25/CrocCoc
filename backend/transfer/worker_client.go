@@ -26,6 +26,7 @@ type workerStartRequest struct {
 	Code            string   `json:"code"`
 	RelayAddress    string   `json:"relayAddress"`
 	RelayPassword   string   `json:"relayPassword"`
+	ManifestDigest  string   `json:"manifestDigest,omitempty"`
 	ContinuePayload bool     `json:"continuePayload,omitempty"`
 	Paths           []string `json:"paths,omitempty"`
 }
@@ -84,9 +85,10 @@ func (w *WorkerClient) Send(
 	ctx context.Context,
 	code, relayAddress, relayPassword string,
 	paths []string,
+	manifestDigest string,
 ) error {
 	if w == nil || w.path == "" || ctx == nil || code == "" || relayPassword == "" ||
-		len(paths) == 0 || strings.ContainsAny(code, "\r\n\x00") ||
+		len(paths) == 0 || len(manifestDigest) != 64 || strings.ContainsAny(code, "\r\n\x00") ||
 		strings.ContainsAny(relayPassword, "\r\n\x00") {
 		return ErrWorkerProtocol
 	}
@@ -108,7 +110,8 @@ func (w *WorkerClient) Send(
 	defer func() { _ = stdin.Close(); _ = stdout.Close() }()
 	if err := json.NewEncoder(stdin).Encode(workerStartRequest{
 		Version: workerWireVersion, Mode: "send", Code: code,
-		RelayAddress: relayAddress, RelayPassword: relayPassword, Paths: append([]string(nil), paths...),
+		RelayAddress: relayAddress, RelayPassword: relayPassword,
+		ManifestDigest: manifestDigest, Paths: append([]string(nil), paths...),
 	}); err != nil {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
@@ -264,6 +267,8 @@ func workerStatusError(status string) error {
 		return ErrResourceLimit
 	case "source_unavailable":
 		return ErrSourceUnavailable
+	case "source_changed":
+		return ErrSourceChanged
 	case "invalid_input":
 		return ErrInvalidInput
 	case "timeout":

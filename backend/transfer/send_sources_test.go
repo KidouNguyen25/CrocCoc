@@ -52,6 +52,28 @@ func TestInspectSendSourcesRejectsUntrustedInputs(t *testing.T) {
 	}
 }
 
+func TestInspectSendSourcesMatchingRejectsChangedTree(t *testing.T) {
+	root := t.TempDir()
+	file := filepath.Join(root, "first.txt")
+	if err := os.WriteFile(file, []byte("first"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := InspectSendSources([]string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := SendManifestDigest(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "second.txt"), []byte("second"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InspectSendSourcesMatching([]string{root}, digest); !errors.Is(err, ErrSourceChanged) {
+		t.Fatalf("changed source tree accepted: %v", err)
+	}
+}
+
 func TestInspectSendSourcesRejectsSymlinkAndAncestors(t *testing.T) {
 	base := t.TempDir()
 	target := filepath.Join(base, "target.txt")

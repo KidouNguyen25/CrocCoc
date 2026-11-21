@@ -1,6 +1,7 @@
 package transfer
 
 import (
+	"encoding/hex"
 	"errors"
 	"io/fs"
 	"os"
@@ -11,7 +12,31 @@ import (
 var (
 	ErrInvalidInput      = errors.New("INVALID_INPUT: cần chọn nguồn hợp lệ")
 	ErrSourceUnavailable = errors.New("SOURCE_UNAVAILABLE: không thể đọc nguồn an toàn")
+	ErrSourceChanged     = errors.New("SOURCE_CHANGED: nguồn thay đổi trước khi truyền")
 )
+
+// SendManifestDigest returns a stable digest for one validated source manifest.
+func SendManifestDigest(entries []ManifestEntry) (string, error) {
+	if _, err := ValidateManifest(entries); err != nil {
+		return "", err
+	}
+	digest := fingerprintManifest(entries)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+// InspectSendSourcesMatching rejects source trees that changed since consent
+// or initial inspection.
+func InspectSendSourcesMatching(paths []string, expectedDigest string) ([]ManifestEntry, error) {
+	entries, err := InspectSendSources(paths)
+	if err != nil {
+		return nil, err
+	}
+	digest, err := SendManifestDigest(entries)
+	if err != nil || len(expectedDigest) != 64 || digest != expectedDigest {
+		return nil, ErrSourceChanged
+	}
+	return entries, nil
+}
 
 // InspectSendSources constructs a bounded, provisional manifest from local
 // files. It rejects symlinks, special files, links in the source's ancestors,

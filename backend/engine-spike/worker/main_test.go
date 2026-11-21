@@ -105,6 +105,39 @@ func TestDecisionTimeoutDoesNotWaitForPipeEOF(t *testing.T) {
 	}
 }
 
+func TestProjectCrocSendManifestPreservesSelectedTree(t *testing.T) {
+	files := []croc.FileInfo{{
+		FolderRemote: "Album/nested/", Name: "photo.txt", Size: 5,
+	}}
+	folders := []croc.FileInfo{{FolderRemote: "Album/Empty/"}}
+	got, err := projectCrocSendManifest(files, folders)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []transfer.ManifestEntry{
+		{Path: "Album", Directory: true},
+		{Path: "Album/Empty", Directory: true},
+		{Path: "Album/nested", Directory: true},
+		{Path: "Album/nested/photo.txt", SizeBytes: 5},
+	}
+	gotDigest, err := transfer.SendManifestDigest(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDigest, err := transfer.SendManifestDigest(want)
+	if err != nil || gotDigest != wantDigest {
+		t.Fatalf("projected source manifest mismatch: %v", err)
+	}
+}
+
+func TestProjectCrocSendManifestRejectsUnsafeEntries(t *testing.T) {
+	if _, err := projectCrocSendManifest([]croc.FileInfo{{
+		FolderRemote: "../outside/", Name: "secret.txt", Size: 1,
+	}}, nil); !errors.Is(err, transfer.ErrUnsafeOffer) {
+		t.Fatalf("unsafe source manifest accepted: %v", err)
+	}
+}
+
 func TestWorkerLoopbackWaitsForDecisionWithoutStartingPayload(t *testing.T) {
 	for _, tc := range []struct {
 		name, status                  string

@@ -21,6 +21,7 @@ type engineSession struct {
 	decision chan receiveDecision
 	pending  *nativeReceiveOffer
 	stage    *ReceiveStage
+	sources  *SendSourceLease
 }
 
 type engineService struct {
@@ -56,36 +57,53 @@ func (s *engineService) StartSend(paths []string) (string, error) {
 	if s == nil || !s.GetCrocInfo().Available {
 		return "", ErrWorkerUnavailable
 	}
-	if _, err := InspectSendSources(paths); err != nil {
+	sources, manifest, err := AcquireSendSourceLease(paths)
+	if err != nil {
+		return "", err
+	}
+	digest, err := SendManifestDigest(manifest)
+	if err != nil {
+		_ = sources.Close()
 		return "", err
 	}
 	code, err := newConnectionCode()
 	if err != nil {
+		_ = sources.Close()
 		return "", err
 	}
 	started, err := s.coordinator.Begin()
 	if err != nil {
+		_ = sources.Close()
 		return "", err
 	}
 	waiting, ok := s.coordinator.Advance(started.TransferID, WaitingForPeer)
 	if !ok {
 		_, _ = s.coordinator.Advance(started.TransferID, Failed)
 		_ = s.coordinator.Release(started.TransferID)
+		_ = sources.Close()
 		return "", ErrWorkerProtocol
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	session := &engineSession{id: waiting.TransferID, cancel: cancel}
+	session := &engineSession{id: waiting.TransferID, cancel: cancel, sources: sources}
 	s.mu.Lock()
 	s.sessions[session.id] = session
 	s.sendCode[session.id] = code
 	s.mu.Unlock()
 	s.emit(waiting, "", code)
-	go s.runSend(ctx, session.id, code, paths)
+	go s.runSend(ctx, session.id, code, paths, digest)
 	return session.id, nil
 }
 
-func (s *engineService) runSend(ctx context.Context, id, code string, paths []string) {
-	err := s.worker.Send(ctx, code, s.cfg.RelayAddress, s.cfg.RelayPassword, paths)
+func (s *engineService) runSend(ctx context.Context, id, code string, paths []string, manifestDigest string) {
+	err := s.worker.Send(ctx, code, s.cfg.RelayAddress, s.cfg.RelayPassword, paths, manifestDigest)
+	s.mu.Lock()
+	session := s.sessions[id]
+	s.mu.Unlock()
+	if session == nil || session.sources == nil || session.sources.Close() != nil {
+		if err == nil {
+			err = ErrSourceUnavailable
+		}
+	}
 	if err == nil {
 		if transferring, ok := s.coordinator.Advance(id, Transferring); ok {
 			s.emit(transferring, "", "")
