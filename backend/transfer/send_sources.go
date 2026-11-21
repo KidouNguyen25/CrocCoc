@@ -40,7 +40,8 @@ func InspectSendSources(paths []string) ([]ManifestEntry, error) {
 				return ErrSourceUnavailable
 			}
 			info, err := os.Lstat(path)
-			if err != nil || info.Mode()&os.ModeSymlink != 0 ||
+			reparse, reparseErr := sourcePathIsReparsePoint(path)
+			if err != nil || reparseErr != nil || reparse || info.Mode()&os.ModeSymlink != 0 ||
 				(!info.IsDir() && !info.Mode().IsRegular()) {
 				return ErrSourceUnavailable
 			}
@@ -85,7 +86,8 @@ func plainSourceAncestors(path string) bool {
 	current := filepath.Clean(path)
 	for {
 		info, err := os.Lstat(current)
-		if err != nil || info.Mode()&os.ModeSymlink != 0 {
+		reparse, reparseErr := sourcePathIsReparsePoint(current)
+		if err != nil || reparseErr != nil || reparse || info.Mode()&os.ModeSymlink != 0 {
 			return false
 		}
 		parent := filepath.Dir(current)
