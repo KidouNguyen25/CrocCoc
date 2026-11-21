@@ -32,10 +32,14 @@ go test -count=1 ./...
 
 Build script cũng chạy worker tests từ checkout Croc sạch trước khi tạo EXE. Hai máy Windows qua relay công cộng và gói Wails cài sạch vẫn cần nghiệm thu riêng.
 
-## Việc backend còn thiếu
+## Backend đã hoàn thiện
 
-- Backend lưu đích nhận trong journal cục bộ có DACL riêng. Recovery kiểm marker và identity trước khi xóa stage còn lại. Test NTFS dừng tiến trình con đột ngột; cần nghiệm thu thêm khi mở app sau reboot Windows. Mục đã publish không bị rollback; journal sai hoặc đích offline chặn engine.
-- Timeout riêng cho chuẩn bị, chờ peer và payload không tiến triển theo kế hoạch. Worker hiện có deadline tổng ba phút; không phát tiến độ byte từ engine.
+- Backend lưu đích nhận trong journal cục bộ có DACL riêng. Recovery kiểm marker và identity trước khi xóa stage còn lại. Test NTFS dừng tiến trình con đột ngột. Mục đã publish không bị rollback; journal sai hoặc đích offline chặn engine.
+- Backend áp dụng 2 phút chuẩn bị, 5 phút chờ peer, 2 phút duyệt và 2 phút không có byte payload mới. Worker báo lúc peer chấp nhận và gửi byte delta qua pipe riêng. Backend chuyển `TRANSFERRING` đúng lúc gửi bắt đầu; UI chưa nhận tiến độ byte. Backend đợi xác nhận worker dừng tối đa 10 giây; nếu chưa xác nhận, backend giữ tài nguyên và chặn phiên mới.
+
+## Cần nghiệm thu
+
+- Xác minh recovery khi mở app sau reboot Windows.
 - Xác minh tuyến relay công cộng trên hai máy và xác minh gói Wails cuối dùng đúng worker đã ghim.
 
-Vì vậy, backend đã có truyền payload qua worker và đã qua loopback Windows; backend chưa đạt toàn bộ tiêu chí nghiệm thu MVP.
+Vì vậy, phần backend đã hoàn thiện và qua loopback Windows; các mục nghiệm thu trên vẫn còn.

@@ -272,6 +272,10 @@ func testWorkerLoopback(t *testing.T, status string, accept, wrongOffer, closePi
 			}
 		}
 	}
+	ready := read()
+	if ready.Status != "waiting_for_peer" || ready.OfferID != "" || len(ready.Entries) != 0 {
+		t.Fatalf("expected peer-wait frame, got %q", ready.Status)
+	}
 	result := read()
 	want := []transfer.ManifestEntry{
 		{Path: "Album", Directory: true},
@@ -286,19 +290,32 @@ func testWorkerLoopback(t *testing.T, status string, accept, wrongOffer, closePi
 	pending := make(chan manifestResult, 1)
 	readError := make(chan error, 1)
 	go func() {
-		raw, err := reader.ReadBytes('\n')
-		var final manifestResult
-		if err == nil {
-			err = json.Unmarshal(raw, &final)
-			if bytes.Contains(raw, []byte(request.Code)) || bytes.Contains(raw, []byte(request.RelayPassword)) {
-				err = errors.New("terminal frame leaked credentials")
+		for {
+			raw, err := reader.ReadBytes('\n')
+			var final manifestResult
+			if err == nil {
+				err = json.Unmarshal(raw, &final)
+				if bytes.Contains(raw, []byte(request.Code)) || bytes.Contains(raw, []byte(request.RelayPassword)) {
+					err = errors.New("control frame leaked credentials")
+				}
 			}
-		}
-		if err != nil {
-			readError <- err
+			if err != nil {
+				readError <- err
+				return
+			}
+			if final.Status == "progress" {
+				if final.ProgressBytes <= 0 {
+					readError <- errors.New("worker reported invalid progress")
+					return
+				}
+				continue
+			}
+			if final.Status == "transferring" {
+				continue
+			}
+			pending <- final
 			return
 		}
-		pending <- final
 	}()
 	select {
 	case early := <-pending:

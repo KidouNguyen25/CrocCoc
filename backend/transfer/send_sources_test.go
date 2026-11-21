@@ -1,6 +1,7 @@
 package transfer
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -71,6 +72,14 @@ func TestInspectSendSourcesMatchingRejectsChangedTree(t *testing.T) {
 	}
 	if _, err := InspectSendSourcesMatching([]string{root}, digest); !errors.Is(err, ErrSourceChanged) {
 		t.Fatalf("changed source tree accepted: %v", err)
+	}
+}
+
+func TestInspectSendSourcesHonorsPreparationCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := InspectSendSourcesContext(ctx, []string{t.TempDir()}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled source scan continued: %v", err)
 	}
 }
 

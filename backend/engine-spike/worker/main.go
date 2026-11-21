@@ -19,7 +19,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
+	"sync"
 
 	"croccoc/backend/transfer"
 	"github.com/schollz/croc/v11/src/croc"
@@ -27,9 +27,8 @@ import (
 )
 
 const (
-	wireVersion   = 2
-	requestLimit  = 8192
-	workerTimeout = 3 * time.Minute
+	wireVersion  = 2
+	requestLimit = 8192
 )
 
 type startRequest struct {
@@ -44,10 +43,22 @@ type startRequest struct {
 }
 
 type manifestResult struct {
-	Version int                      `json:"version"`
-	Status  string                   `json:"status"`
-	OfferID string                   `json:"offerID,omitempty"`
-	Entries []transfer.ManifestEntry `json:"entries,omitempty"`
+	Version       int                      `json:"version"`
+	Status        string                   `json:"status"`
+	OfferID       string                   `json:"offerID,omitempty"`
+	Entries       []transfer.ManifestEntry `json:"entries,omitempty"`
+	ProgressBytes int64                    `json:"progressBytes,omitempty"`
+}
+
+type controlEncoder struct {
+	mu      sync.Mutex
+	encoder *json.Encoder
+}
+
+func (e *controlEncoder) Encode(frame manifestResult) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.encoder.Encode(frame)
 }
 
 type decisionRequest struct {
@@ -138,7 +149,7 @@ func validRelayHostname(host string) bool {
 
 // captureManifest lets the host review the authenticated manifest before Croc
 // requests payload. Approved requests continue into Croc's normal receive path.
-func captureManifest(ctx context.Context, request startRequest, consume func(context.Context, []transfer.ManifestEntry) error) error {
+func captureManifest(ctx context.Context, request startRequest, stream *controlEncoder, consume func(context.Context, []transfer.ManifestEntry) error) error {
 	client, err := croc.NewCtx(ctx, croc.Options{
 		SharedSecret:     request.Code,
 		RelayAddress:     request.RelayAddress,
@@ -153,6 +164,14 @@ func captureManifest(ctx context.Context, request startRequest, consume func(con
 	})
 	if err != nil {
 		return err
+	}
+	client.SetProgressHandler(func(delta int64) {
+		if delta > 0 {
+			_ = stream.Encode(manifestResult{Version: wireVersion, Status: "progress", ProgressBytes: delta})
+		}
+	})
+	if err := stream.Encode(manifestResult{Version: wireVersion, Status: "waiting_for_peer"}); err != nil {
+		return errControlWrite
 	}
 	manifestConsumer := func(ctx context.Context, info croc.SenderInfo) error {
 		if err := ctx.Err(); err != nil {
@@ -199,7 +218,7 @@ func captureManifest(ctx context.Context, request startRequest, consume func(con
 	return err
 }
 
-func runSend(ctx context.Context, request startRequest) error {
+func runSend(ctx context.Context, request startRequest, stream *controlEncoder) error {
 	expected, err := transfer.InspectSendSourcesMatching(request.Paths, request.ManifestDigest)
 	if err != nil {
 		return err
@@ -225,6 +244,17 @@ func runSend(ctx context.Context, request startRequest) error {
 	})
 	if err != nil {
 		return err
+	}
+	client.SetProgressHandler(func(delta int64) {
+		if delta > 0 {
+			_ = stream.Encode(manifestResult{Version: wireVersion, Status: "progress", ProgressBytes: delta})
+		}
+	})
+	client.SetTransferStartedHandler(func() {
+		_ = stream.Encode(manifestResult{Version: wireVersion, Status: "transferring"})
+	})
+	if err := stream.Encode(manifestResult{Version: wireVersion, Status: "waiting_for_peer"}); err != nil {
+		return errControlWrite
 	}
 	return client.Send(files, folders, count)
 }
@@ -308,13 +338,13 @@ func waitDecisionRequest(ctx context.Context, in *bufio.Reader, offerID string) 
 	}
 }
 
-func awaitOfferDecision(ctx context.Context, in *bufio.Reader, out *json.Encoder, entries []transfer.ManifestEntry, continuePayload bool) error {
+func awaitOfferDecision(ctx context.Context, in *bufio.Reader, out *json.Encoder, entries []transfer.ManifestEntry, continuePayload bool, stream *controlEncoder) error {
 	var nonce [16]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return err
 	}
 	offerID := hex.EncodeToString(nonce[:])
-	decisionCtx, cancel := context.WithTimeout(ctx, transfer.OfferDecisionTimeout)
+	decisionCtx, cancel := context.WithTimeout(ctx, transfer.WorkerOfferDecisionTimeout)
 	defer cancel()
 	if decisionCtx.Err() != nil {
 		return decisionCtx.Err()
@@ -346,20 +376,23 @@ func awaitOfferDecision(ctx context.Context, in *bufio.Reader, out *json.Encoder
 	if err := os.Chdir(payloadDir); err != nil {
 		return errInvalidDecision
 	}
+	if err := stream.Encode(manifestResult{Version: wireVersion, Status: "transferring"}); err != nil {
+		return errControlWrite
+	}
 	return nil
 }
 
 func run(ctx context.Context, in io.Reader, out io.Writer) int {
 	reader := bufio.NewReaderSize(in, requestLimit)
-	writer := json.NewEncoder(out)
+	writer := &controlEncoder{encoder: json.NewEncoder(out)}
 	result := manifestResult{Version: wireVersion, Status: "invalid_request"}
 	request, err := readRequest(reader)
 	if err == nil {
 		if request.Mode == "send" {
-			err = runSend(ctx, request)
+			err = runSend(ctx, request, writer)
 		} else {
-			err = captureManifest(ctx, request, func(ctx context.Context, entries []transfer.ManifestEntry) error {
-				return awaitOfferDecision(ctx, reader, writer, entries, request.ContinuePayload)
+			err = captureManifest(ctx, request, writer, func(ctx context.Context, entries []transfer.ManifestEntry) error {
+				return awaitOfferDecision(ctx, reader, writer.encoder, entries, request.ContinuePayload, writer)
 			})
 		}
 		switch {
@@ -413,10 +446,8 @@ func main() {
 	os.Stdout, os.Stderr = sink, sink
 	crocLog.SetOutput(io.Discard)
 
-	ctx, cancel := context.WithTimeout(context.Background(), workerTimeout)
-	timer := time.AfterFunc(workerTimeout+time.Second, func() { os.Exit(1) })
+	ctx, cancel := context.WithCancel(context.Background())
 	code := run(ctx, os.Stdin, control)
-	timer.Stop()
 	cancel()
 	sink.Close()
 	os.Exit(code)

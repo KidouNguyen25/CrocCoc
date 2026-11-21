@@ -8,8 +8,6 @@ import (
 	"time"
 )
 
-const OfferDecisionTimeout = 2 * time.Minute
-
 // ReceiveOffer is a sanitized, copyable view of an untrusted peer manifest.
 // It is metadata only: constructing an offer never authorizes payload download.
 type ReceiveOffer struct {

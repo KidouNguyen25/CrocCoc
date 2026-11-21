@@ -1,6 +1,7 @@
 package transfer
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"io/fs"
@@ -27,7 +28,11 @@ func SendManifestDigest(entries []ManifestEntry) (string, error) {
 // InspectSendSourcesMatching rejects source trees that changed since consent
 // or initial inspection.
 func InspectSendSourcesMatching(paths []string, expectedDigest string) ([]ManifestEntry, error) {
-	entries, err := InspectSendSources(paths)
+	return InspectSendSourcesMatchingContext(context.Background(), paths, expectedDigest)
+}
+
+func InspectSendSourcesMatchingContext(ctx context.Context, paths []string, expectedDigest string) ([]ManifestEntry, error) {
+	entries, err := InspectSendSourcesContext(ctx, paths)
 	if err != nil {
 		return nil, err
 	}
@@ -46,21 +51,37 @@ func InspectSendSourcesMatching(paths []string, expectedDigest string) ([]Manife
 // held/rechecked through native handles before and during engine reads.
 // Never authorize real transmission based on this result alone.
 func InspectSendSources(paths []string) ([]ManifestEntry, error) {
+	return InspectSendSourcesContext(context.Background(), paths)
+}
+
+func InspectSendSourcesContext(ctx context.Context, paths []string) ([]ManifestEntry, error) {
+	if ctx == nil {
+		return nil, ErrInvalidInput
+	}
 	if len(paths) == 0 {
 		return nil, ErrInvalidInput
 	}
 	entries := make([]ManifestEntry, 0)
 	var total int64
 	for _, selected := range paths {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if selected == "" || strings.TrimSpace(selected) == "" {
 			return nil, ErrInvalidInput
 		}
 		root, err := filepath.Abs(selected)
-		if err != nil || !plainSourceAncestors(root) {
+		if err != nil || !plainSourceAncestorsContext(ctx, root) {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			return nil, ErrSourceUnavailable
 		}
 		name := filepath.Base(root)
 		err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if walkErr != nil {
 				return ErrSourceUnavailable
 			}
@@ -108,8 +129,15 @@ func InspectSendSources(paths []string) ([]ManifestEntry, error) {
 }
 
 func plainSourceAncestors(path string) bool {
+	return plainSourceAncestorsContext(context.Background(), path)
+}
+
+func plainSourceAncestorsContext(ctx context.Context, path string) bool {
 	current := filepath.Clean(path)
 	for {
+		if ctx.Err() != nil {
+			return false
+		}
 		info, err := os.Lstat(current)
 		reparse, reparseErr := sourcePathIsReparsePoint(current)
 		if err != nil || reparseErr != nil || reparse || info.Mode()&os.ModeSymlink != 0 {

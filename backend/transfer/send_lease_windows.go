@@ -3,6 +3,7 @@
 package transfer
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,10 +23,17 @@ type SendSourceLease struct {
 // AcquireSendSourceLease locks selected trees and their path ancestors against
 // replacement, writes, and reparse-point traversal. Call Close after engine I/O.
 func AcquireSendSourceLease(paths []string) (*SendSourceLease, []ManifestEntry, error) {
+	return AcquireSendSourceLeaseContext(context.Background(), paths)
+}
+
+func AcquireSendSourceLeaseContext(ctx context.Context, paths []string) (*SendSourceLease, []ManifestEntry, error) {
+	if ctx == nil {
+		return nil, nil, ErrInvalidInput
+	}
 	if len(paths) == 0 {
 		return nil, nil, ErrInvalidInput
 	}
-	manifest, err := InspectSendSources(paths)
+	manifest, err := InspectSendSourcesContext(ctx, paths)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -35,21 +43,28 @@ func AcquireSendSourceLease(paths []string) (*SendSourceLease, []ManifestEntry, 
 	}
 	lease := &SendSourceLease{}
 	for _, selected := range paths {
+		if err := ctx.Err(); err != nil {
+			_ = lease.Close()
+			return nil, nil, err
+		}
 		if selected == "" || strings.TrimSpace(selected) == "" {
 			_ = lease.Close()
 			return nil, nil, ErrInvalidInput
 		}
 		root, err := filepath.Abs(selected)
-		if err != nil || !lockSourceAncestors(lease, root) {
+		if err != nil || !lockSourceAncestors(ctx, lease, root) {
 			_ = lease.Close()
+			if ctx.Err() != nil {
+				return nil, nil, ctx.Err()
+			}
 			return nil, nil, ErrSourceUnavailable
 		}
-		if err := lease.lockTree(root); err != nil {
+		if err := lease.lockTree(ctx, root); err != nil {
 			_ = lease.Close()
 			return nil, nil, err
 		}
 	}
-	lockedManifest, err := InspectSendSourcesMatching(paths, digest)
+	lockedManifest, err := InspectSendSourcesMatchingContext(ctx, paths, digest)
 	if err != nil {
 		_ = lease.Close()
 		return nil, nil, err
@@ -57,7 +72,10 @@ func AcquireSendSourceLease(paths []string) (*SendSourceLease, []ManifestEntry, 
 	return lease, lockedManifest, nil
 }
 
-func lockSourceAncestors(lease *SendSourceLease, path string) bool {
+func lockSourceAncestors(ctx context.Context, lease *SendSourceLease, path string) bool {
+	if ctx.Err() != nil {
+		return false
+	}
 	volume := filepath.VolumeName(path)
 	if len(volume) != 2 || volume[1] != ':' {
 		return false
@@ -73,6 +91,9 @@ func lockSourceAncestors(lease *SendSourceLease, path string) bool {
 	parts := strings.Split(remainder, `\`)
 	current := root
 	for _, part := range parts[:len(parts)-1] {
+		if ctx.Err() != nil {
+			return false
+		}
 		current = filepath.Join(current, part)
 		if !lease.openPath(current, true, true) {
 			return false
@@ -81,7 +102,10 @@ func lockSourceAncestors(lease *SendSourceLease, path string) bool {
 	return true
 }
 
-func (l *SendSourceLease) lockTree(path string) error {
+func (l *SendSourceLease) lockTree(ctx context.Context, path string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	isDir, ok := l.openObject(path, false)
 	if !ok {
 		return ErrSourceUnavailable
@@ -94,7 +118,7 @@ func (l *SendSourceLease) lockTree(path string) error {
 		return ErrSourceUnavailable
 	}
 	for _, entry := range entries {
-		if err := l.lockTree(filepath.Join(path, entry.Name())); err != nil {
+		if err := l.lockTree(ctx, filepath.Join(path, entry.Name())); err != nil {
 			return err
 		}
 	}

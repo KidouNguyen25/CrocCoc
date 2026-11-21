@@ -4,6 +4,7 @@ package transfer
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"strings"
 	"sync"
@@ -71,8 +72,13 @@ func (s *engineService) StartSend(paths []string) (string, error) {
 	if s == nil || !s.GetCrocInfo().Available {
 		return "", s.unavailableError()
 	}
-	sources, manifest, err := AcquireSendSourceLease(paths)
+	preparationCtx, preparationCancel := context.WithTimeout(context.Background(), PreparationTimeout)
+	defer preparationCancel()
+	sources, manifest, err := AcquireSendSourceLeaseContext(preparationCtx, paths)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return "", ErrPreparationTimeout
+		}
 		return "", err
 	}
 	digest, err := SendManifestDigest(manifest)
@@ -80,10 +86,18 @@ func (s *engineService) StartSend(paths []string) (string, error) {
 		_ = sources.Close()
 		return "", err
 	}
+	if errors.Is(preparationCtx.Err(), context.DeadlineExceeded) {
+		_ = sources.Close()
+		return "", ErrPreparationTimeout
+	}
 	code, err := newConnectionCode()
 	if err != nil {
 		_ = sources.Close()
 		return "", err
+	}
+	if errors.Is(preparationCtx.Err(), context.DeadlineExceeded) {
+		_ = sources.Close()
+		return "", ErrPreparationTimeout
 	}
 	started, err := s.coordinator.Begin()
 	if err != nil {
@@ -109,14 +123,20 @@ func (s *engineService) StartSend(paths []string) (string, error) {
 }
 
 func (s *engineService) runSend(ctx context.Context, id, code string, paths []string, manifestDigest string) {
-	err := s.worker.Send(ctx, code, s.cfg.RelayAddress, s.cfg.RelayPassword, paths, manifestDigest)
+	err := s.worker.send(ctx, code, s.cfg.RelayAddress, s.cfg.RelayPassword, paths, manifestDigest, func() {
+		s.markSendTransferring(id)
+	})
+	cleanupPending := errors.Is(err, ErrWorkerCleanupPending)
 	s.mu.Lock()
 	session := s.sessions[id]
 	s.mu.Unlock()
-	if session == nil || session.sources == nil || session.sources.Close() != nil {
+	if session == nil || session.sources == nil {
 		if err == nil {
 			err = ErrSourceUnavailable
 		}
+	} else if !cleanupPending && session.sources.Close() != nil {
+		cleanupPending = true
+		err = ErrWorkerCleanupPending
 	}
 	if err == nil {
 		if transferring, ok := s.coordinator.Advance(id, Transferring); ok {
@@ -134,6 +154,12 @@ func (s *engineService) runSend(ctx context.Context, id, code string, paths []st
 	s.releaseSession(id)
 }
 
+func (s *engineService) markSendTransferring(id string) {
+	if transferring, ok := s.coordinator.Advance(id, Transferring); ok {
+		s.emit(transferring, "", "")
+	}
+}
+
 func (s *engineService) StartReceive(code, outputDir string) (string, error) {
 	if s == nil || !s.GetCrocInfo().Available {
 		return "", s.unavailableError()
@@ -141,8 +167,12 @@ func (s *engineService) StartReceive(code, outputDir string) (string, error) {
 	if strings.TrimSpace(code) == "" || strings.ContainsAny(code, "\r\n\x00") || outputDir == "" {
 		return "", ErrInvalidInput
 	}
+	preparationStarted := time.Now()
 	if err := CheckReceiveDestinationEligibility(outputDir); err != nil {
 		return "", err
+	}
+	if time.Since(preparationStarted) >= PreparationTimeout {
+		return "", ErrPreparationTimeout
 	}
 	started, err := s.coordinator.BeginReceive()
 	if err != nil {
@@ -168,9 +198,14 @@ func (s *engineService) runReceive(ctx context.Context, session *engineSession, 
 	activationAttempted := false
 	err := s.worker.ReceiveAndContinue(ctx, "", code, s.cfg.RelayAddress, s.cfg.RelayPassword,
 		func(offer ReceiveOffer) (bool, string, error) {
+			preparationStarted := time.Now()
 			pending, snapshot, _, err := presentNativeReceiveOfferWithID(&s.coordinator, session.id, outputDir, offerToManifest(offer), offer.OfferID)
 			if err != nil {
 				return false, "", err
+			}
+			if time.Since(preparationStarted) >= PreparationTimeout {
+				_ = pending.Close()
+				return false, "", ErrPreparationTimeout
 			}
 			s.mu.Lock()
 			session.pending = pending
@@ -184,7 +219,15 @@ func (s *engineService) runReceive(ctx context.Context, session *engineSession, 
 					return false, "", nil
 				}
 				activationAttempted = true
-				stage, active, err := pending.activate(ctx)
+				preparationCtx, cancel := context.WithTimeout(ctx, PreparationTimeout)
+				stage, active, err := pending.activate(preparationCtx)
+				preparationErr := preparationCtx.Err()
+				cancel()
+				if err == nil && errors.Is(preparationErr, context.DeadlineExceeded) {
+					err = ErrPreparationTimeout
+				} else if errors.Is(err, context.DeadlineExceeded) {
+					err = ErrPreparationTimeout
+				}
 				if err != nil {
 					return false, "", err
 				}
@@ -223,7 +266,14 @@ func (s *engineService) runReceive(ctx context.Context, session *engineSession, 
 		}
 		return
 	}
-	cleanupPending := activationAttempted || stage != nil
+	workerCleanupPending := errors.Is(err, ErrWorkerCleanupPending)
+	cleanupPending := activationAttempted || stage != nil || workerCleanupPending
+	if stage != nil && !workerCleanupPending && stage.Close() == nil && pending != nil && pending.Close() == nil {
+		if recoverOwnedReceiveStage(stage.JournalPath()) == nil {
+			cleanupPending = false
+			pending = nil
+		}
+	}
 	if pending != nil && pending.Close() != nil {
 		cleanupPending = true
 	}
@@ -314,12 +364,22 @@ func (s *engineService) failSession(id string, cause error) {
 		cause = ErrWorkerProtocol
 	}
 	if current, ok := s.coordinator.Snapshot(id); ok && current.State == Cancelling {
+		if errors.Is(cause, ErrWorkerCleanupPending) {
+			if snapshot, advanced := s.coordinator.Advance(id, Failed); advanced {
+				snapshot, _ = s.coordinator.SetTerminalFlags(id, false, true)
+				s.emitFailure(snapshot, cause)
+			}
+			return
+		}
 		if snapshot, advanced := s.coordinator.Advance(id, Cancelled); advanced {
 			s.emit(snapshot, cause.Error(), "")
 		}
 		return
 	}
 	if snapshot, ok := s.coordinator.Advance(id, Failed); ok {
+		if errors.Is(cause, ErrWorkerCleanupPending) {
+			snapshot, _ = s.coordinator.SetTerminalFlags(id, false, true)
+		}
 		s.emitFailure(snapshot, cause)
 		return
 	}
@@ -335,7 +395,7 @@ func (s *engineService) finishReceiveSession(id string, cause error, partialOutp
 	}
 	if !IsTerminal(snapshot.State) {
 		next := Failed
-		if snapshot.State == Cancelling {
+		if snapshot.State == Cancelling && !cleanupPending {
 			next = Cancelled
 		}
 		if advanced, changed := s.coordinator.Advance(id, next); changed {

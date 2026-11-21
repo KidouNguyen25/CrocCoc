@@ -53,6 +53,48 @@ func TestReceiveFailureWithoutOwnedStageReleasesService(t *testing.T) {
 	}
 }
 
+func TestSendTransferStartAdvancesCoordinatorOnce(t *testing.T) {
+	updates := new([]Update)
+	service := &engineService{
+		cfg:      EngineServiceConfig{EventSink: func(update Update) { *updates = append(*updates, update) }},
+		sessions: make(map[string]*engineSession),
+	}
+	started, err := service.coordinator.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiting, ok := service.coordinator.Advance(started.TransferID, WaitingForPeer)
+	if !ok {
+		t.Fatal("failed to enter waiting state")
+	}
+	id := waiting.TransferID
+	service.markSendTransferring(id)
+	service.markSendTransferring(id)
+
+	snapshot, ok := service.GetTransferSnapshot(id)
+	if !ok || snapshot.State != Transferring || snapshot.Revision != 3 {
+		t.Fatalf("send did not enter transferring exactly once: %+v", snapshot)
+	}
+	if len(*updates) != 1 || (*updates)[0].State != Transferring {
+		t.Fatalf("send emitted wrong transfer updates: %+v", *updates)
+	}
+}
+
+func TestWorkerCleanupPendingKeepsCoordinatorBusy(t *testing.T) {
+	service, id, updates := receiveServiceFixture(t)
+	service.finishReceiveSession(id, ErrWorkerCleanupPending, false, true)
+	snapshot, ok := service.GetTransferSnapshot(id)
+	if !ok || snapshot.State != Failed || !snapshot.CleanupPending {
+		t.Fatalf("worker cleanup state lost: %+v", snapshot)
+	}
+	if _, err := service.coordinator.Begin(); !errors.Is(err, ErrBusy) {
+		t.Fatalf("new session admitted before worker cleanup: %v", err)
+	}
+	if len(*updates) != 1 || (*updates)[0].State != Failed || !(*updates)[0].CleanupPending {
+		t.Fatalf("cleanup failure emitted wrong terminal update: %+v", *updates)
+	}
+}
+
 func TestRecoveryPendingKeepsEngineUnavailable(t *testing.T) {
 	service := &engineService{recoveryErr: ErrRecoveryPending}
 	if info := service.GetCrocInfo(); info.Available || info.Message != ErrRecoveryPending.Error() {
