@@ -140,19 +140,22 @@ func TestProjectCrocSendManifestRejectsUnsafeEntries(t *testing.T) {
 
 func TestWorkerLoopbackWaitsForDecisionWithoutStartingPayload(t *testing.T) {
 	for _, tc := range []struct {
-		name, status                  string
-		accept, wrongOffer, closePipe bool
+		name, status                                   string
+		accept, wrongOffer, closePipe, continuePayload bool
 	}{
 		{name: "accepted", status: "accepted_no_payload", accept: true},
+		{name: "accepted payload", status: "completed", accept: true, continuePayload: true},
 		{name: "rejected", status: "rejected"},
 		{name: "stale offer", status: "invalid_decision", accept: true, wrongOffer: true},
 		{name: "pipe closed", status: "invalid_decision", closePipe: true},
 	} {
-		t.Run(tc.name, func(t *testing.T) { testWorkerLoopback(t, tc.status, tc.accept, tc.wrongOffer, tc.closePipe) })
+		t.Run(tc.name, func(t *testing.T) {
+			testWorkerLoopback(t, tc.status, tc.accept, tc.wrongOffer, tc.closePipe, tc.continuePayload)
+		})
 	}
 }
 
-func testWorkerLoopback(t *testing.T, status string, accept, wrongOffer, closePipe bool) {
+func testWorkerLoopback(t *testing.T, status string, accept, wrongOffer, closePipe, continuePayload bool) {
 	ctx, cancel := context.WithTimeout(t.Context(), 12*time.Second)
 	defer cancel()
 	listen := func() net.Listener {
@@ -173,6 +176,7 @@ func testWorkerLoopback(t *testing.T, status string, accept, wrongOffer, closePi
 	request := startRequest{
 		Version: wireVersion, Code: "point-frost-worker-fixture",
 		RelayAddress: control.Addr().String(), RelayPassword: "local-test-relay",
+		ContinuePayload: continuePayload,
 	}
 	go tcp.RunWithListener(data, request.RelayPassword, tcp.WithCtx(ctx), tcp.WithLogLevel("error"))
 	go tcp.RunWithListener(control, request.RelayPassword, tcp.WithCtx(ctx), tcp.WithLogLevel("error"), tcp.WithBanner(dataPort))
@@ -249,11 +253,23 @@ func testWorkerLoopback(t *testing.T, status string, accept, wrongOffer, closePi
 		}
 		return result
 	}
-	checkDestination := func() {
+	checkDestination := func(expectPayload bool) {
 		t.Helper()
 		items, err := os.ReadDir(dest)
-		if err != nil || len(items) != 0 {
+		if err != nil {
+			t.Fatal("cannot inspect worker destination")
+		}
+		if !expectPayload && len(items) != 0 {
 			t.Fatal("worker wrote to its destination")
+		}
+		if expectPayload {
+			data, err := os.ReadFile(filepath.Join(dest, "Album", "ảnh.txt"))
+			if err != nil || string(data) != "sample" {
+				t.Fatalf("worker did not receive exact payload: %q %v", data, err)
+			}
+			if info, err := os.Stat(filepath.Join(dest, "Album", "Empty")); err != nil || !info.IsDir() {
+				t.Fatalf("worker did not receive empty directory: %v", err)
+			}
 		}
 	}
 	result := read()
@@ -291,7 +307,7 @@ func testWorkerLoopback(t *testing.T, status string, accept, wrongOffer, closePi
 		t.Fatalf("worker output closed before decision: %v", err)
 	case <-time.After(100 * time.Millisecond):
 	}
-	checkDestination()
+	checkDestination(false)
 	if closePipe {
 		if err := in.Close(); err != nil {
 			t.Fatal(err)
@@ -301,7 +317,11 @@ func testWorkerLoopback(t *testing.T, status string, accept, wrongOffer, closePi
 		if wrongOffer {
 			offerID = "not the current offer"
 		}
-		if err := encoder.Encode(decisionRequest{Version: wireVersion, OfferID: offerID, Accept: &accept}); err != nil {
+		decision := decisionRequest{Version: wireVersion, OfferID: offerID, Accept: &accept}
+		if continuePayload && accept {
+			decision.PayloadDir = dest
+		}
+		if err := encoder.Encode(decision); err != nil {
 			t.Fatal("write worker decision")
 		}
 	}
@@ -323,14 +343,25 @@ func testWorkerLoopback(t *testing.T, status string, accept, wrongOffer, closePi
 	if (err == nil) != (status != "invalid_decision") {
 		t.Fatalf("unexpected worker exit for %q: %v", status, err)
 	}
-	checkDestination()
-	cancel()
-	select {
-	case sendErr := <-senderDone:
-		if sendErr == nil {
-			t.Fatal("sender reported a successful payload transfer")
+	checkDestination(continuePayload)
+	if continuePayload {
+		select {
+		case sendErr := <-senderDone:
+			if sendErr != nil {
+				t.Fatalf("sender payload failed: %v", sendErr)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("test sender did not finish")
 		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("test sender did not stop")
+	} else {
+		cancel()
+		select {
+		case sendErr := <-senderDone:
+			if sendErr == nil {
+				t.Fatal("sender reported a successful payload transfer")
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("test sender did not stop")
+		}
 	}
 }

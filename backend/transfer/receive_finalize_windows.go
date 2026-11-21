@@ -11,7 +11,7 @@ var ErrReceiveFinalization = errors.New("TRANSFER_FAILED: không thể hoàn t�
 // FinalizeNativeReceive owns the receiver's finalization gate. The caller
 // must invoke it only after the engine has verified protocol integrity and all
 // approved files are staged. It publishes outside the coordinator lock, then
-// closes native handles before releasing the terminal session.
+// removes the verified stage and journal before releasing the terminal session.
 //
 // A publish failure leaves the coordinator busy in FAILED until its caller
 // completes any separately verified recovery. No new session is admitted
@@ -33,6 +33,12 @@ func FinalizeNativeReceive(
 	}
 	result, err := publishAuditedRoots(lease, stage, entries)
 	if err != nil {
+		if failed, advanced := c.Advance(id, Failed); advanced {
+			snapshot = failed
+		}
+		return snapshot, result, err
+	}
+	if err := cleanupPublishedReceiveStage(lease, stage); err != nil {
 		if failed, advanced := c.Advance(id, Failed); advanced {
 			snapshot = failed
 		}

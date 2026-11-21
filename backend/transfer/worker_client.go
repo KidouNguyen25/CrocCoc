@@ -56,8 +56,7 @@ func NewWorkerClient(path string) *WorkerClient {
 }
 
 // ReceiveManifest obtains one sanitized offer and sends exactly one decision.
-// The current helper stops before payload I/O; callers must stage and publish
-// through the native receive path after a future payload-capable worker.
+// This method stops before payload I/O, even when the caller accepts.
 func (w *WorkerClient) ReceiveManifest(
 	ctx context.Context,
 	code, relayAddress, relayPassword string,

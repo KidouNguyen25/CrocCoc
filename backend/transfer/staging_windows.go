@@ -77,6 +77,10 @@ func (s *ReceiveStage) Close() error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.closeHandlesLocked()
+}
+
+func (s *ReceiveStage) closeHandlesLocked() error {
 	var failed bool
 	if s.payload != 0 {
 		failed = windows.CloseHandle(s.payload) != nil

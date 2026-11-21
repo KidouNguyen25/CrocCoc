@@ -88,3 +88,28 @@ func TestPinWorkerExecutableRejectsRelativePathAndHashMismatch(t *testing.T) {
 		t.Fatalf("wrong worker hash accepted: %v", err)
 	}
 }
+
+func TestEngineServiceReportsOnlyPinnedWorkerAvailable(t *testing.T) {
+	fakePath := filepath.Join(t.TempDir(), "worker.exe")
+	if err := os.WriteFile(fakePath, []byte("fake worker"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	config := EngineServiceConfig{WorkerPath: fakePath, RelayAddress: "relay.example.test:9009", RelayPassword: "fixture"}
+	if info := NewEngineService(config).GetCrocInfo(); info.Available {
+		t.Fatal("unverified worker reported as available")
+	}
+
+	pinnedPath := filepath.Join("..", "engine-spike", "worker", "croccoc-engine-spike.exe")
+	if _, err := os.Stat(pinnedPath); errors.Is(err, os.ErrNotExist) {
+		t.Skip("pinned worker build is not present")
+	}
+	absolutePath, err := filepath.Abs(pinnedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.WorkerPath = absolutePath
+	info := NewEngineService(config).GetCrocInfo()
+	if !info.Available || info.Version != PinnedCrocVersion {
+		t.Fatalf("verified worker rejected: %+v", info)
+	}
+}

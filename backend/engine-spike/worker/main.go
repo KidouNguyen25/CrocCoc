@@ -1,6 +1,6 @@
 //go:build croc_no_tailcat
 
-// This worker is a private protocol helper, not part of the desktop binaries.
+// This worker is a private protocol helper launched by the desktop host.
 package main
 
 import (
@@ -136,8 +136,8 @@ func validRelayHostname(host string) bool {
 	return true
 }
 
-// captureManifest holds the authenticated receive callback open while consume
-// handles the offer. The pinned Croc hook still stops before payload I/O.
+// captureManifest lets the host review the authenticated manifest before Croc
+// requests payload. Approved requests continue into Croc's normal receive path.
 func captureManifest(ctx context.Context, request startRequest, consume func(context.Context, []transfer.ManifestEntry) error) error {
 	client, err := croc.NewCtx(ctx, croc.Options{
 		SharedSecret:     request.Code,

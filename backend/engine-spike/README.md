@@ -1,41 +1,41 @@
-# Spike nhận metadata của Croc
+# Backend engine Croc
 
-Bản thử ghim Croc v11.6.4 tại commit `f4cfdc17e06ac8a5834e146666798170138c3391`. Patch mượn giao thức và bộ giải mã Croc, không sửa wire. Áp dụng vào checkout upstream sạch để chạy lại. Không áp dụng vào checkout CrocCoc.
+Backend ghim Croc v11.6.4 tại commit `f4cfdc17e06ac8a5834e146666798170138c3391`. Patch mở callback manifest trước khi Croc yêu cầu payload. Patch không đổi wire protocol. Không áp dụng patch vào checkout CrocCoc.
 
-```text
-git -C <croc-checkout> rev-parse HEAD
-git -C <croc-checkout> apply --check <absolute-patch-path>
-git -C <croc-checkout> apply <absolute-patch-path>
+## Build và xác minh worker
+
+Chạy PowerShell trên Windows:
+
+```powershell
+.\backend\engine-spike\worker\build.ps1
 ```
 
-Trong checkout Croc đã vá, dùng toolchain theo `go.mod` upstream. Có thể biên dịch PE x64 trong Docker với `GOOS=windows GOARCH=amd64 CGO_ENABLED=0` rồi chạy test trên Windows.
+Script clone đúng commit Croc, kiểm rồi áp patch, khóa Go 1.27.3 và build Windows amd64 không Tailcat. Script chạy loopback test gồm nhận tệp và thư mục rỗng, rồi so SHA-256 với `backend/transfer/worker_hash_windows.go`. Build dừng nếu hash không khớp. Worker xuất hiện tại `backend/engine-spike/worker/croccoc-engine-spike.exe`; file build không thuộc Git.
 
-```text
-go test -c -o croc-manifest-probe.test.exe ./src/croc
-croc-manifest-probe.test.exe -test.run TestCrocCocManifestOnly -test.v -test.timeout 25s
+Host nhận đường dẫn tuyệt đối qua `CROCCOC_WORKER_PATH`. Backend chỉ báo Croc khả dụng khi worker khớp SHA-256 đã ghim. Backend giữ khóa file và tổ tiên để chặn sửa hoặc thay worker trong lúc app chạy. Relay dùng `CROCCOC_RELAY_ADDRESS` và `CROCCOC_RELAY_PASSWORD`.
+
+## Giao thức và luồng nhận
+
+Worker dùng pipe riêng v2: mỗi frame là một JSON trên một dòng, tối đa 8 KiB. Mã kết nối, mật khẩu relay và đường dẫn nguồn đi qua stdin; không đưa vào argv, env của worker hoặc stdout. Stdout chỉ chứa frame có cấu trúc. Worker tắt local discovery và clipboard.
+
+Worker gửi manifest đã chuẩn hóa cho host. Host kiểm tên, quota, đích và hiện đề nghị nhận. Chỉ quyết định đúng `offerID` mới kích hoạt staging. Worker tiếp tục Croc vào staging riêng; backend kiểm cây payload và publish từng mục gốc bằng rename no-replace. Worker từ chối, timeout hoặc lỗi trước khi staging được cấp quyền không ghi payload.
+
+`ReceiveManifest` chỉ thu metadata. `ReceiveAndContinue` tiếp tục truyền sau khi callback của host cho phép. Ca loopback trên Windows kiểm cả hai nhánh. Nhánh nhận thật xác minh nội dung tệp và thư mục rỗng; các nhánh từ chối, sai `offerID` và đóng pipe xác minh không ghi payload.
+
+## Kiểm thử Windows
+
+Chạy backend tests tại repo root:
+
+```powershell
+go test -count=1 ./...
 ```
 
-## Điểm dừng được xác minh
+Build script cũng chạy worker tests từ checkout Croc sạch trước khi tạo EXE. Hai máy Windows qua relay công cộng và gói Wails cài sạch vẫn cần nghiệm thu riêng.
 
-`ReceiveManifest` dùng client riêng và trả metadata có kiểu. Hook ở đầu `processSenderInfo`, trước khi chuẩn bị đầu ra hoặc đặt cờ cho phép yêu cầu dữ liệu. Dù callback trả `nil`, hook kết thúc bằng `ErrManifestOnly`, không phải thành công truyền tệp. Callback từ chối hoặc bị hủy không chuyển tiếp sang nhánh payload. API nhận thông thường của Croc không đổi.
+## Việc backend còn thiếu
 
-Đã chạy PE x64 trên máy phát triển Windows. Bộ test kiểm frame legacy và chunked đã mã hóa, callback chỉ nhận danh sách đầy đủ, hủy hoặc từ chối, và luồng gửi/nhận qua relay TCP loopback. Ca loopback quan sát được metadata của một tệp, sender không vào trạng thái yêu cầu payload và thư mục nhận vẫn rỗng.
+- Khôi phục stage có journal sau crash. Publish thành công xóa stage và journal. Nếu cleanup lỗi, backend đặt `cleanupPending` và giữ Coordinator bận trong tiến trình hiện tại. Journal chưa lưu đích nên lần khởi động mới chưa thể khôi phục stage.
+- Tách timeout chuẩn bị, chờ peer và payload không tiến triển theo kế hoạch. Worker hiện có deadline tổng ba phút; không phát tiến độ byte từ engine.
+- Xác minh tuyến relay công cộng trên hai máy và xác minh gói Wails cuối dùng đúng worker đã ghim.
 
-## Worker loopback
-
-Module `worker/` nối callback Croc với bộ chiếu manifest của backend. Module thay thế nguồn Croc bằng checkout đã vá ở `.tmp/croc-engine-spike`. Từ `worker/`, build hoặc test với bản chỉ relay, không có Tailcat.
-
-```text
-go build -tags croc_no_tailcat .
-go test -tags croc_no_tailcat -run TestWorkerLoopbackWaitsForDecisionWithoutStartingPayload -v .
-```
-
-Worker chỉ chấp nhận relay loopback dạng địa chỉ IP, tắt local discovery và không lấy mã từ argv hoặc env. Giao thức pipe riêng v2 dùng một giá trị JSON trên mỗi dòng, giới hạn mỗi frame đầu vào 8 KiB và không yêu cầu đóng stdin giữa các bước.
-
-1. Tiến trình gọi gửi frame bắt đầu trên stdin. Worker trả `awaiting_decision` kèm manifest và `offerID` ngẫu nhiên trên stdout, rồi giữ nguyên phiên Croc chờ quyết định trong callback.
-2. Tiến trình gọi gửi frame `{"version":2,"offerID":"<offer hiện tại>","accept":true}` hoặc `accept:false`. Quyết định phải đến trong thời hạn offer và không vượt quá deadline tổng của worker. Pipe bị đóng, sai offer hoặc sai frame đều dừng phiên.
-3. Worker trả đúng một frame kết thúc. `accepted_no_payload` nghĩa là nhận được quyết định đồng ý nhưng **không** yêu cầu payload. Các trạng thái khác gồm `rejected`, `invalid_decision` và `cancelled`. Kết quả không chứa mã kết nối, mật khẩu, source path, ID máy hoặc địa chỉ peer.
-
-Test loopback chạy sender và relay TCP, giữ stdin mở khi worker chờ, rồi kiểm các nhánh đồng ý, từ chối, sai offer và đóng pipe. Ca đồng ý vẫn không cho sender báo truyền thành công và không ghi vào thư mục nhận.
-
-Spike đã giữ được phiên chờ đồng ý trong worker thử nghiệm. Chưa nối quyết định với permit của Coordinator, chưa nhận payload vào staging, và chưa nghiệm thu trên hai máy Windows. Giới hạn giải mã upstream trước hook vẫn chưa phải ngân sách MVP. Đây không phải kênh production hay bằng chứng nghiệm thu relay công cộng. Host giữ `NOT_INTEGRATED`.
+Vì vậy, backend đã có truyền payload qua worker và đã qua loopback Windows; backend chưa đạt toàn bộ tiêu chí nghiệm thu MVP.
