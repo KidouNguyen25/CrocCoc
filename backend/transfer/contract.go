@@ -17,6 +17,10 @@ var ErrTransferFailed = errors.New("TRANSFER_FAILED: truyền tệp thất bại
 
 var ErrPeerTimeout = errors.New("PEER_TIMEOUT: peer không phản hồi trong thời hạn")
 
+var ErrOfferTimeout = errors.New("OFFER_TIMEOUT: đề nghị nhận tệp đã quá thời hạn xác nhận")
+
+var ErrCopyUnsafe = errors.New("COPY_UNSAFE: không thể sao chép mã an toàn vào clipboard")
+
 type State string
 
 const (

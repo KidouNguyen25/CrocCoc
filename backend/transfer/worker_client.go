@@ -137,7 +137,7 @@ func readWorkerFrameWithin(ctx context.Context, reader *bufio.Reader, dst any, t
 
 func readWorkerCompletion(ctx context.Context, cmd *exec.Cmd, cancel context.CancelFunc, stdin io.WriteCloser,
 	reader *bufio.Reader, firstTimeout time.Duration, firstTimeoutErr error, payloadTimeout time.Duration,
-	onTransferStarted func(), secrets ...string) (workerManifestFrame, error) {
+	onTransferStarted func(), onProgress func(int64), secrets ...string) (workerManifestFrame, error) {
 	timeout := firstTimeout
 	timeoutErr := firstTimeoutErr
 	for {
@@ -167,6 +167,9 @@ func readWorkerCompletion(ctx context.Context, cmd *exec.Cmd, cancel context.Can
 					return workerManifestFrame{}, cleanupErr
 				}
 				return workerManifestFrame{}, ErrWorkerProtocol
+			}
+			if onProgress != nil {
+				onProgress(frame.ProgressBytes)
 			}
 			timeout = payloadTimeout
 			timeoutErr = ErrPayloadTimeout
@@ -201,7 +204,7 @@ func (w *WorkerClient) ReceiveManifest(
 	code, relayAddress, relayPassword string,
 	decide func(ReceiveOffer) (bool, string, error),
 ) error {
-	return w.receiveManifest(ctx, "", false, code, relayAddress, relayPassword, decide)
+	return w.receiveManifest(ctx, "", false, code, relayAddress, relayPassword, decide, nil)
 }
 
 // ReceiveAndContinue runs payload receive inside workingDir after the
@@ -213,7 +216,19 @@ func (w *WorkerClient) ReceiveAndContinue(
 	code, relayAddress, relayPassword string,
 	decide func(ReceiveOffer) (bool, string, error),
 ) error {
-	return w.receiveManifest(ctx, workingDir, true, code, relayAddress, relayPassword, decide)
+	return w.receiveManifest(ctx, workingDir, true, code, relayAddress, relayPassword, decide, nil)
+}
+
+// ReceiveAndContinueWithProgress extends ReceiveAndContinue with a delta-byte
+// progress callback invoked on verified worker progress frames.
+func (w *WorkerClient) ReceiveAndContinueWithProgress(
+	ctx context.Context,
+	workingDir string,
+	code, relayAddress, relayPassword string,
+	decide func(ReceiveOffer) (bool, string, error),
+	onProgress func(int64),
+) error {
+	return w.receiveManifest(ctx, workingDir, true, code, relayAddress, relayPassword, decide, onProgress)
 }
 
 // Send transfers validated source paths through private worker stdin. Paths
@@ -225,7 +240,7 @@ func (w *WorkerClient) Send(
 	paths []string,
 	manifestDigest string,
 ) error {
-	return w.send(ctx, code, relayAddress, relayPassword, paths, manifestDigest, nil)
+	return w.send(ctx, code, relayAddress, relayPassword, paths, manifestDigest, nil, nil)
 }
 
 func (w *WorkerClient) send(
@@ -234,6 +249,7 @@ func (w *WorkerClient) send(
 	paths []string,
 	manifestDigest string,
 	onTransferStarted func(),
+	onProgress func(int64),
 ) error {
 	if w == nil || w.path == "" || ctx == nil || code == "" || relayPassword == "" ||
 		len(paths) == 0 || len(manifestDigest) != 64 || strings.ContainsAny(code, "\r\n\x00") ||
@@ -288,7 +304,7 @@ func (w *WorkerClient) send(
 		return workerStatusError(ready.Status)
 	}
 	result, err := readWorkerCompletion(ctx, cmd, cancel, stdin, reader, PeerWaitTimeout, ErrPeerTimeout,
-		PayloadIdleTimeout, onTransferStarted, code, relayPassword)
+		PayloadIdleTimeout, onTransferStarted, onProgress, code, relayPassword)
 	if err != nil {
 		return err
 	}
@@ -304,11 +320,23 @@ func (w *WorkerClient) receiveManifest(
 	continuePayload bool,
 	code, relayAddress, relayPassword string,
 	decide func(ReceiveOffer) (bool, string, error),
+	onProgress func(int64),
 ) error {
 	if w == nil || w.path == "" || ctx == nil || decide == nil ||
 		code == "" || relayPassword == "" ||
 		strings.ContainsAny(code, "\r\n\x00") || strings.ContainsAny(relayPassword, "\r\n\x00") {
 		return ErrWorkerProtocol
+	}
+	requestBytes, err := json.Marshal(workerStartRequest{
+		Version: workerWireVersion, Code: code,
+		RelayAddress: relayAddress, RelayPassword: relayPassword,
+		ContinuePayload: continuePayload,
+	})
+	if err != nil {
+		return ErrWorkerProtocol
+	}
+	if len(requestBytes)+1 > workerRequestLimit {
+		return ErrResourceLimit
 	}
 	cmd, stdin, stdout, cancel, err := startWorker(ctx, w.path)
 	if err != nil {
@@ -322,12 +350,7 @@ func (w *WorkerClient) receiveManifest(
 	defer cleanup()
 
 	encoder := json.NewEncoder(stdin)
-	request := workerStartRequest{
-		Version: workerWireVersion, Code: code,
-		RelayAddress: relayAddress, RelayPassword: relayPassword,
-		ContinuePayload: continuePayload,
-	}
-	if err := encoder.Encode(request); err != nil {
+	if _, err := stdin.Write(append(requestBytes, '\n')); err != nil {
 		if cleanupErr := stopWorker(cmd, cancel); cleanupErr != nil {
 			return cleanupErr
 		}
@@ -407,7 +430,7 @@ func (w *WorkerClient) receiveManifest(
 		return ErrWorkerProtocol
 	}
 	result, err := readWorkerCompletion(ctx, cmd, cancel, stdin, reader, PayloadIdleTimeout, ErrPayloadTimeout,
-		PayloadIdleTimeout, nil, code, relayPassword)
+		PayloadIdleTimeout, nil, onProgress, code, relayPassword)
 	if err != nil {
 		return err
 	}

@@ -16,12 +16,25 @@ type receiveDecision struct {
 }
 
 type engineSession struct {
-	id       string
-	cancel   context.CancelFunc
-	decision chan receiveDecision
-	pending  *nativeReceiveOffer
-	stage    *ReceiveStage
-	sources  *SendSourceLease
+	id               string
+	cancel           context.CancelFunc
+	decision         chan receiveDecision
+	pending          *nativeReceiveOffer
+	stage            *ReceiveStage
+	sources          *SendSourceLease
+	bytesTotal       int64
+	bytesTransferred int64
+	lastProgressEmit time.Time
+}
+
+func manifestTotalBytes(entries []ManifestEntry) int64 {
+	var total int64
+	for _, entry := range entries {
+		if !entry.Directory && entry.SizeBytes > 0 {
+			total += entry.SizeBytes
+		}
+	}
+	return total
 }
 
 type engineService struct {
@@ -112,7 +125,12 @@ func (s *engineService) StartSend(paths []string) (string, error) {
 		return "", ErrWorkerProtocol
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	session := &engineSession{id: waiting.TransferID, cancel: cancel, sources: sources}
+	session := &engineSession{
+		id:         waiting.TransferID,
+		cancel:     cancel,
+		sources:    sources,
+		bytesTotal: manifestTotalBytes(manifest),
+	}
 	s.mu.Lock()
 	s.sessions[session.id] = session
 	s.sendCode[session.id] = code
@@ -125,6 +143,8 @@ func (s *engineService) StartSend(paths []string) (string, error) {
 func (s *engineService) runSend(ctx context.Context, id, code string, paths []string, manifestDigest string) {
 	err := s.worker.send(ctx, code, s.cfg.RelayAddress, s.cfg.RelayPassword, paths, manifestDigest, func() {
 		s.markSendTransferring(id)
+	}, func(delta int64) {
+		s.recordProgress(id, delta)
 	})
 	cleanupPending := errors.Is(err, ErrWorkerCleanupPending)
 	s.mu.Lock()
@@ -196,10 +216,10 @@ func (s *engineService) StartReceive(code, outputDir string) (string, error) {
 
 func (s *engineService) runReceive(ctx context.Context, session *engineSession, code, outputDir string) {
 	activationAttempted := false
-	err := s.worker.ReceiveAndContinue(ctx, "", code, s.cfg.RelayAddress, s.cfg.RelayPassword,
+	err := s.worker.ReceiveAndContinueWithProgress(ctx, "", code, s.cfg.RelayAddress, s.cfg.RelayPassword,
 		func(offer ReceiveOffer) (bool, string, error) {
 			preparationStarted := time.Now()
-			pending, snapshot, _, err := presentNativeReceiveOfferWithID(&s.coordinator, session.id, outputDir, offerToManifest(offer), offer.OfferID)
+			pending, snapshot, presentedOffer, err := presentNativeReceiveOfferWithID(&s.coordinator, session.id, outputDir, offerToManifest(offer), offer.OfferID)
 			if err != nil {
 				return false, "", err
 			}
@@ -209,9 +229,16 @@ func (s *engineService) runReceive(ctx context.Context, session *engineSession, 
 			}
 			s.mu.Lock()
 			session.pending = pending
+			session.bytesTotal = manifestTotalBytes(pending.entries)
 			s.mu.Unlock()
-			s.emitOffer(snapshot, offer)
-			timer := time.NewTimer(OfferDecisionTimeout)
+			s.emitOffer(snapshot, presentedOffer)
+			waitDuration := OfferDecisionTimeout
+			if !presentedOffer.ExpiresAt.IsZero() {
+				if until := time.Until(presentedOffer.ExpiresAt); until > 0 {
+					waitDuration = until
+				}
+			}
+			timer := time.NewTimer(waitDuration)
 			defer timer.Stop()
 			select {
 			case decision := <-session.decision:
@@ -237,11 +264,19 @@ func (s *engineService) runReceive(ctx context.Context, session *engineSession, 
 				s.emit(active, "", "")
 				return true, stage.PayloadPath(), nil
 			case <-timer.C:
-				s.coordinator.ExpireReceiveOffer(session.id, time.Now())
-				return false, "", nil
+				expireNow := time.Now().UTC()
+				if !presentedOffer.ExpiresAt.IsZero() && expireNow.Before(presentedOffer.ExpiresAt) {
+					expireNow = presentedOffer.ExpiresAt
+				}
+				if cancelling, expired := s.coordinator.ExpireReceiveOffer(session.id, expireNow); expired {
+					s.emit(cancelling, "", "")
+				}
+				return false, "", ErrOfferTimeout
 			case <-ctx.Done():
 				return false, "", ctx.Err()
 			}
+		}, func(delta int64) {
+			s.recordProgress(session.id, delta)
 		})
 	s.mu.Lock()
 	stage := session.stage
@@ -319,8 +354,12 @@ func (s *engineService) DecideReceive(id, offerID string, accept bool) (bool, er
 	if session == nil || pending == nil || pending.offerID != offerID {
 		return false, nil
 	}
-	if _, ok := s.coordinator.DecideReceive(id, offerID, accept, time.Now()); !ok {
+	snapshot, ok := s.coordinator.DecideReceive(id, offerID, accept, time.Now())
+	if !ok {
 		return false, nil
+	}
+	if !accept {
+		s.emit(snapshot, "", "")
 	}
 	// The buffer holds one decision; if a cancel already filled it, the
 	// session is ending and a blocking send would never return.
@@ -346,15 +385,85 @@ func (s *engineService) CancelTransfer(id string) (bool, error) {
 	if session == nil {
 		return false, nil
 	}
-	if _, ok := s.coordinator.Cancel(id); !ok {
+	snapshot, ok := s.coordinator.Cancel(id)
+	if !ok {
 		return false, nil
 	}
+	s.emit(snapshot, "", "")
 	session.cancel()
 	select {
 	case session.decision <- receiveDecision{accept: false}:
 	default:
 	}
 	return true, nil
+}
+
+func (s *engineService) Shutdown() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	ids := make([]string, 0, len(s.sessions))
+	for id := range s.sessions {
+		ids = append(ids, id)
+	}
+	workerPin := s.workerPin
+	s.workerPin = nil
+	s.mu.Unlock()
+	for _, id := range ids {
+		_, _ = s.CancelTransfer(id)
+	}
+	if workerPin != nil {
+		_ = workerPin.Close()
+	}
+}
+
+func (s *engineService) recordProgress(id string, delta int64) {
+	if s == nil || delta <= 0 {
+		return
+	}
+	now := time.Now()
+	s.mu.Lock()
+	session := s.sessions[id]
+	if session == nil {
+		s.mu.Unlock()
+		return
+	}
+	session.bytesTransferred += delta
+	if session.bytesTotal > 0 && session.bytesTransferred > session.bytesTotal {
+		session.bytesTransferred = session.bytesTotal
+	}
+	transferred := session.bytesTransferred
+	total := session.bytesTotal
+	shouldEmit := session.lastProgressEmit.IsZero() ||
+		now.Sub(session.lastProgressEmit) >= 150*time.Millisecond ||
+		(total > 0 && transferred >= total)
+	if shouldEmit {
+		session.lastProgressEmit = now
+	}
+	s.mu.Unlock()
+	if !shouldEmit {
+		return
+	}
+	snapshot, ok := s.coordinator.TouchProgress(id)
+	if !ok || s.cfg.EventSink == nil {
+		return
+	}
+	update := Update{
+		TransferID:       snapshot.TransferID,
+		Revision:         snapshot.Revision,
+		State:            snapshot.State,
+		BytesTransferred: &transferred,
+	}
+	if total > 0 {
+		update.BytesTotal = &total
+		pct := float64(transferred) * 100 / float64(total)
+		if pct > 100 {
+			pct = 100
+		}
+		update.Progress = &pct
+	}
+	s.cfg.EventSink(update)
 }
 
 func (s *engineService) GetSendCode(id string) (string, bool) {
@@ -412,7 +521,7 @@ func (s *engineService) finishReceiveSession(id string, cause error, partialOutp
 	}
 	if !IsTerminal(snapshot.State) {
 		next := Failed
-		if snapshot.State == Cancelling && !cleanupPending {
+		if snapshot.State == Cancelling && !cleanupPending && !errors.Is(cause, ErrOfferTimeout) {
 			next = Cancelled
 		}
 		if advanced, changed := s.coordinator.Advance(id, next); changed {

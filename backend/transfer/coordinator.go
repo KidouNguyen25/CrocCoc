@@ -109,6 +109,18 @@ func (c *Coordinator) Cancel(id string) (SessionSnapshot, bool) {
 	return c.Advance(id, Cancelling)
 }
 
+// TouchProgress bumps revision while the active session is transferring so
+// emitted progress snapshots stay strictly monotonic per ICD.
+func (c *Coordinator) TouchProgress(id string) (SessionSnapshot, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.active == nil || c.active.TransferID != id || c.active.State != Transferring {
+		return SessionSnapshot{}, false
+	}
+	c.active.Revision++
+	return *c.active, true
+}
+
 // Snapshot reads the live session or most recently released terminal session.
 func (c *Coordinator) Snapshot(id string) (SessionSnapshot, bool) {
 	c.mu.Lock()

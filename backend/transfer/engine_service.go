@@ -22,6 +22,7 @@ type EngineController interface {
 	GetReceiveOffer(transferID string) (ReceiveOffer, bool)
 	GetTransferSnapshot(transferID string) (SessionSnapshot, bool)
 	GetSendCode(transferID string) (string, bool)
+	Shutdown()
 }
 
 func newConnectionCode() (string, error) {

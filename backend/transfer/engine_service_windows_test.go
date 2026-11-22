@@ -168,3 +168,55 @@ func TestEngineServiceReportsOnlyPinnedWorkerAvailable(t *testing.T) {
 		t.Fatalf("verified worker rejected: %+v", info)
 	}
 }
+
+func TestCancelTransferEmitsCancellingAndRecordProgressAdvancesRevision(t *testing.T) {
+	updates := new([]Update)
+	service := &engineService{
+		cfg:      EngineServiceConfig{EventSink: func(update Update) { *updates = append(*updates, update) }},
+		sessions: make(map[string]*engineSession),
+		sendCode: make(map[string]string),
+	}
+	started, err := service.coordinator.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiting, ok := service.coordinator.Advance(started.TransferID, WaitingForPeer)
+	if !ok {
+		t.Fatal("failed to enter waiting")
+	}
+	id := waiting.TransferID
+	cancelled := false
+	service.sessions[id] = &engineSession{
+		id:         id,
+		cancel:     func() { cancelled = true },
+		bytesTotal: 1000,
+	}
+	service.markSendTransferring(id)
+	service.recordProgress(id, 400)
+	if len(*updates) != 2 {
+		t.Fatalf("expected transferring + progress updates, got %d: %+v", len(*updates), *updates)
+	}
+	progressUpdate := (*updates)[1]
+	if progressUpdate.Revision <= (*updates)[0].Revision || progressUpdate.BytesTransferred == nil || *progressUpdate.BytesTransferred != 400 || progressUpdate.BytesTotal == nil || *progressUpdate.BytesTotal != 1000 {
+		t.Fatalf("unexpected progress update: %+v", progressUpdate)
+	}
+	okCancel, err := service.CancelTransfer(id)
+	if !okCancel || err != nil || !cancelled {
+		t.Fatalf("cancel failed: ok=%t err=%v cancelled=%t", okCancel, err, cancelled)
+	}
+	last := (*updates)[len(*updates)-1]
+	if last.State != Cancelling || last.ConnectionCode != "" {
+		t.Fatalf("expected immediate CANCELLING without code, got %+v", last)
+	}
+}
+
+func TestOfferTimeoutTransitionsToFailedWithOfferTimeoutCode(t *testing.T) {
+	service, id, updates := receiveServiceFixture(t)
+	if _, ok := service.coordinator.Cancel(id); !ok {
+		t.Fatal("failed to enter cancelling")
+	}
+	service.finishReceiveSession(id, ErrOfferTimeout, false, false)
+	if len(*updates) != 1 || (*updates)[0].State != Failed || (*updates)[0].Error == nil || (*updates)[0].Error.Code != "OFFER_TIMEOUT" {
+		t.Fatalf("expected FAILED with OFFER_TIMEOUT, got %+v", *updates)
+	}
+}

@@ -24,3 +24,5 @@ func (unavailableEngineController) GetTransferSnapshot(string) (SessionSnapshot,
 func (unavailableEngineController) GetSendCode(string) (string, bool) {
 	return "", false
 }
+
+func (unavailableEngineController) Shutdown() {}
