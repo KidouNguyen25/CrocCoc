@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import type { ReceiveOffer } from '../transfer.ts'
 import { formatBytes } from '../utils/formatters.ts'
 
@@ -10,23 +10,63 @@ interface ReceiveOfferDialogProps {
 
 export function ReceiveOfferDialog({ offer, onDecide, disabled = false }: ReceiveOfferDialogProps) {
   const { fileCount, totalBytes, items, expiresAt } = offer
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const previouslyFocused = useRef<HTMLElement | null>(null)
 
   useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
+    // Save previously focused element
+    previouslyFocused.current = document.activeElement as HTMLElement | null
+
+    // Focus trap
+    const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && !disabled) {
+        e.preventDefault()
         onDecide(false)
+        return
+      }
+      if (e.key === 'Tab') {
+        const focusableElements = dialogRef.current?.querySelectorAll<HTMLElement>(
+          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+        )
+        const firstElement = focusableElements?.[0] as HTMLElement | undefined
+        const lastElement = focusableElements?.[focusableElements.length - 1] as HTMLElement | undefined
+
+        if (e.shiftKey && document.activeElement === firstElement) {
+          e.preventDefault()
+          lastElement?.focus()
+        } else if (!e.shiftKey && (document.activeElement as HTMLElement | null) === lastElement) {
+          e.preventDefault()
+          firstElement?.focus()
+        }
       }
     }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [disabled, onDecide])
+
+    document.addEventListener('keydown', handleKeyDown)
+
+    // Focus first focusable element (Accept button)
+    const focusTarget = dialogRef.current?.querySelector<HTMLElement>('button[autoFocus]') ||
+      dialogRef.current?.querySelector<HTMLElement>('.btn-accept')
+    setTimeout(() => focusTarget?.focus(), 0)
+
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown)
+      // Restore focus to previously focused element
+      previouslyFocused.current?.focus()
+    }
+  }, [disabled])
 
   const expiryLabel = expiresAt
     ? new Date(expiresAt).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
     : ''
 
   return (
-    <div className="offer-dialog-card" role="dialog" aria-modal="true" aria-labelledby="offer-title">
+    <div
+      ref={dialogRef}
+      className="offer-dialog-card"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="offer-title"
+    >
       <div className="offer-header">
         <span className="offer-badge">YÊU CẦU TRUYỀN TỆP</span>
         <h3 id="offer-title">Bên gửi muốn gửi cho bạn:</h3>

@@ -1,4 +1,5 @@
 import type { CrocInfo } from '../transfer.ts'
+import logoMark from '../assets/croccoc-mark.svg'
 
 interface HeaderProps {
   hostTitle: string
@@ -15,7 +16,14 @@ export function Header({ hostTitle, crocInfo, isDesktop }: HeaderProps) {
   return (
     <header className="masthead">
       <div className="wordmark" title="CrocCoc - Ứng dụng truyền tệp ngang hàng với Croc">
-        <span className="mark" aria-hidden="true">↔</span>
+        <img
+          className="mark"
+          src={logoMark}
+          alt=""
+          aria-hidden="true"
+          width="38"
+          height="38"
+        />
         <div className="title-group">
           <span className="app-name">CrocCoc</span>
           <span className="subtitle">Chuyển tệp P2P an toàn</span>
