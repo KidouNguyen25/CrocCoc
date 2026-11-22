@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"sync"
 
 	"croccoc/backend/transfer"
@@ -43,34 +44,101 @@ func (a *App) DecideReceive(transferID, offerID string, accept bool) (bool, erro
 	return controller.DecideReceive(transferID, offerID, accept)
 }
 
-func (a *App) GetReceiveOffer(transferID string) (transfer.ReceiveOffer, bool) {
+func (a *App) GetReceiveOffer(transferID string) *transfer.ReceiveOffer {
 	controller, ok := a.transfers.(transfer.EngineController)
 	if !ok {
-		return transfer.ReceiveOffer{}, false
+		return nil
 	}
-	return controller.GetReceiveOffer(transferID)
+	offer, found := controller.GetReceiveOffer(transferID)
+	if !found {
+		return nil
+	}
+	return &offer
 }
 
-func (a *App) GetTransferSnapshot(transferID string) (transfer.SessionSnapshot, bool) {
+func (a *App) GetTransferSnapshot(transferID string) *transfer.SessionSnapshot {
 	controller, ok := a.transfers.(transfer.EngineController)
 	if !ok {
-		return transfer.SessionSnapshot{}, false
+		return nil
 	}
-	return controller.GetTransferSnapshot(transferID)
+	snapshot, found := controller.GetTransferSnapshot(transferID)
+	if !found {
+		return nil
+	}
+	return &snapshot
 }
 
-func (a *App) GetSendCode(transferID string) (string, bool) {
+// CopySendCode writes the active sender code directly to the OS clipboard with
+// Windows monitor/history/cloud exclusion markers. It never accepts arbitrary
+// text from WebView and fails closed with COPY_UNSAFE when markers fail.
+func (a *App) CopySendCode(transferID string) error {
 	controller, ok := a.transfers.(transfer.EngineController)
 	if !ok {
-		return "", false
+		return transfer.ErrNotIntegrated
 	}
-	return controller.GetSendCode(transferID)
+	code, found := controller.GetSendCode(transferID)
+	if !found {
+		return transfer.ErrCopyUnsafe
+	}
+	return transfer.CopySecretToProtectedClipboard(code)
+}
+
+// SelectPaths returns absolute paths from native OS dialogs. Browser File objects
+// do not reliably expose paths readable by the desktop transfer engine.
+func (a *App) SelectPaths(kind string) ([]string, error) {
+	a.mu.RLock()
+	ctx := a.ctx
+	a.mu.RUnlock()
+	if ctx == nil {
+		return nil, errors.New("desktop runtime is not ready")
+	}
+
+	switch kind {
+	case "sendFiles":
+		paths, err := wailsruntime.OpenMultipleFilesDialog(ctx, wailsruntime.OpenDialogOptions{Title: "Chọn tệp để gửi"})
+		if paths == nil && err == nil {
+			paths = []string{}
+		}
+		return paths, err
+	case "sendDirectory", "receiveDirectory":
+		title := "Chọn thư mục để gửi"
+		if kind == "receiveDirectory" {
+			title = "Chọn thư mục lưu tệp nhận"
+		}
+		path, err := wailsruntime.OpenDirectoryDialog(ctx, wailsruntime.OpenDialogOptions{Title: title})
+		if err != nil {
+			return nil, err
+		}
+		if path == "" {
+			return []string{}, nil
+		}
+		return []string{path}, nil
+	default:
+		return nil, transfer.ErrInvalidInput
+	}
 }
 
 func (a *App) setRuntimeContext(ctx context.Context) {
 	a.mu.Lock()
 	a.ctx = ctx
 	a.mu.Unlock()
+}
+
+func (a *App) focusWindow() {
+	a.mu.RLock()
+	ctx := a.ctx
+	a.mu.RUnlock()
+	if ctx == nil {
+		return
+	}
+	wailsruntime.WindowUnminimise(ctx)
+	wailsruntime.WindowShow(ctx)
+}
+
+func (a *App) shutdown() {
+	if controller, ok := a.transfers.(transfer.EngineController); ok {
+		controller.Shutdown()
+	}
 }
 
 func (a *App) emitTransferUpdate(update transfer.Update) {

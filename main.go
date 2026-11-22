@@ -17,6 +17,8 @@ import (
 //go:embed all:frontend/dist
 var assets embed.FS
 
+const singleInstanceUUID = "8f94d7c2-6b3e-4d1a-9c52-7e3a1b4f8c90"
+
 func main() {
 	app := newApp(transfer.NewUnavailableService())
 	app.transfers = transfer.NewEngineService(engineServiceConfig(app.emitTransferUpdate))
@@ -29,8 +31,21 @@ func main() {
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},
+		SingleInstanceLock: &options.SingleInstanceLock{
+			UniqueId: singleInstanceUUID,
+			OnSecondInstanceLaunch: func(options.SecondInstanceData) {
+				app.focusWindow()
+			},
+		},
 		OnStartup: func(ctx context.Context) {
 			app.setRuntimeContext(ctx)
+		},
+		OnBeforeClose: func(context.Context) bool {
+			app.shutdown()
+			return false
+		},
+		OnShutdown: func(context.Context) {
+			app.shutdown()
 		},
 		Bind: []interface{}{app},
 	}); err != nil {
