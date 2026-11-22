@@ -4,7 +4,10 @@ export type TransferState =
   | 'IDLE'
   | 'PREPARING'
   | 'WAITING_FOR_PEER'
+  | 'AWAITING_ACCEPTANCE'
   | 'TRANSFERRING'
+  | 'FINALIZING'
+  | 'CANCELLING'
   | 'COMPLETED'
   | 'FAILED'
   | 'CANCELLED'
@@ -16,8 +19,28 @@ export interface CrocInfo {
   message?: string
 }
 
+export interface OfferItem {
+  path: string
+  type: 'file' | 'directory' | string
+  sizeBytes?: string
+}
+
+export interface ReceiveOffer {
+  offerID: string
+  items: OfferItem[]
+  fileCount: number
+  totalBytes: string
+  expiresAt: string
+}
+
+export interface TransferError {
+  code: string
+  message: string
+}
+
 export interface TransferUpdate {
   transferID: string
+  revision?: number
   state: TransferState
   currentFile?: string
   bytesTransferred?: number
@@ -26,6 +49,10 @@ export interface TransferUpdate {
   progress?: number
   message?: string
   connectionCode?: string
+  receiveOffer?: ReceiveOffer
+  error?: TransferError
+  partialOutput?: boolean
+  cleanupPending?: boolean
 }
 
 export interface TransferClient {
@@ -33,9 +60,17 @@ export interface TransferClient {
   startSend(paths: string[]): Promise<string>
   startReceive(code: string, outputDir: string): Promise<string>
   cancelTransfer(transferID: string): Promise<boolean>
+  decideReceive?(transferID: string, offerID: string, accept: boolean): Promise<boolean>
   subscribe(handler: (update: TransferUpdate) => void): () => void
 }
 
 export function isRunning(state: TransferState): boolean {
-  return state === 'PREPARING' || state === 'WAITING_FOR_PEER' || state === 'TRANSFERRING'
+  return (
+    state === 'PREPARING' ||
+    state === 'WAITING_FOR_PEER' ||
+    state === 'AWAITING_ACCEPTANCE' ||
+    state === 'TRANSFERRING' ||
+    state === 'FINALIZING' ||
+    state === 'CANCELLING'
+  )
 }

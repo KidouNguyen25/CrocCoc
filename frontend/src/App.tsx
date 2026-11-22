@@ -1,101 +1,217 @@
-import { useEffect, useState } from 'react'
-import { getDesktopClient } from './adapters/wailsTransfer'
-import { createMockTransferClient, SAMPLE_CODE } from './mockTransfer'
-import { isRunning } from './transfer'
-import type { TransferState, TransferUpdate } from './transfer'
-
-const mock = createMockTransferClient()
-const stateLabel: Record<TransferState, string> = {
-  IDLE: 'Sẵn sàng',
-  PREPARING: 'Đang chuẩn bị',
-  WAITING_FOR_PEER: 'Đang chờ thiết bị bên kia',
-  TRANSFERRING: 'Đang mô phỏng truyền tệp',
-  COMPLETED: 'Mô phỏng hoàn tất',
-  FAILED: 'Mô phỏng thất bại',
-  CANCELLED: 'Đã hủy mô phỏng',
-}
+import { useEffect, useState, useRef, useMemo } from 'react'
+import { getDesktopClient } from './adapters/wailsTransfer.ts'
+import { createMockTransferClient } from './mockTransfer.ts'
+import { isRunning } from './transfer.ts'
+import type { CrocInfo, TransferClient, TransferUpdate } from './transfer.ts'
+import { Header } from './components/Header.tsx'
+import { ModeSwitcher } from './components/ModeSwitcher.tsx'
+import { SendPanel } from './components/SendPanel.tsx'
+import { ReceivePanel } from './components/ReceivePanel.tsx'
 
 export function App() {
   const [mode, setMode] = useState<'send' | 'receive'>('send')
-  const [host, setHost] = useState('Bản xem trước trên web')
+  const [isDesktop, setIsDesktop] = useState(false)
+  const [useMock, setUseMock] = useState(false)
+  const [crocInfo, setCrocInfo] = useState<CrocInfo>()
+  const [hostTitle, setHostTitle] = useState('Đang khởi tạo...')
   const [update, setUpdate] = useState<TransferUpdate>()
+  const [connectionCode, setConnectionCode] = useState('')
   const [pending, setPending] = useState(false)
-  const [error, setError] = useState('')
-  const [sampleCode, setSampleCode] = useState('')
+  const [appError, setAppError] = useState('')
+
+  // Create persistent mock client instance for browser preview
+  const mockClient = useMemo(() => createMockTransferClient(), [])
+  const clientRef = useRef<TransferClient>(mockClient)
+
+  // Identify runtime environment and active client
+  useEffect(() => {
+    const desktop = getDesktopClient()
+    if (desktop && !useMock) {
+      setIsDesktop(true)
+      clientRef.current = desktop
+      setHostTitle('Ứng dụng desktop (Wails IPC)')
+      desktop.getCrocInfo().then(
+        (info) => {
+          setCrocInfo(info)
+          if (!info.available) {
+            setHostTitle('Ứng dụng desktop · Chưa phát hiện Croc')
+          }
+        },
+        () => {
+          setCrocInfo({ available: false, message: 'Không thể kết nối Croc engine.' })
+          setHostTitle('Ứng dụng desktop · Lỗi kiểm tra Croc')
+        },
+      )
+    } else {
+      setIsDesktop(false)
+      clientRef.current = mockClient
+      setHostTitle(useMock ? 'Chế độ mô phỏng thủ công' : 'Bản xem trước trình duyệt (Mock)')
+      mockClient.getCrocInfo().then((info) => setCrocInfo(info))
+    }
+
+    // Subscribe to transfer events
+    const unsubscribe = clientRef.current.subscribe((event) => {
+      setUpdate(event)
+      if (event.connectionCode) {
+        setConnectionCode(event.connectionCode)
+      }
+      if (event.state === 'CANCELLED' || event.state === 'FAILED') {
+        // Keep connection code if already generated, unless cancelled before generation
+      }
+    })
+
+    return () => {
+      unsubscribe()
+    }
+  }, [useMock, mockClient])
+
   const state = update?.state ?? 'IDLE'
   const busy = pending || isRunning(state)
 
-  useEffect(() => {
-    const desktop = getDesktopClient()
-    if (desktop) {
-      setHost('Ứng dụng desktop')
-      void desktop.getCrocInfo().then(
-        (info) => setHost(info.available ? 'Ứng dụng desktop' : 'Ứng dụng desktop · Chưa kết nối Croc'),
-        () => setHost('Ứng dụng desktop · Không đọc được trạng thái Croc'),
-      )
-    }
-    return mock.subscribe((event) => {
-      setUpdate(event)
-      if (event.connectionCode) setSampleCode(event.connectionCode)
-      if (event.state === 'CANCELLED' || event.state === 'FAILED') setSampleCode('')
-    })
-  }, [])
-
-  const simulate = async () => {
+  const handleStartSend = async (paths: string[]) => {
     setPending(true)
-    setSampleCode('')
-    setError('')
+    setAppError('')
+    setConnectionCode('')
     try {
-      const transferID = mode === 'send'
-        ? await mock.startSend(['tai-lieu-mau.pdf'])
-        : await mock.startReceive(SAMPLE_CODE, 'Downloads')
+      const transferID = await clientRef.current.startSend(paths)
       setUpdate({ transferID, state: 'PREPARING' })
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Không chạy được mô phỏng.')
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Lỗi khi bắt đầu phiên gửi.'
+      setAppError(message)
+      throw err
     } finally {
       setPending(false)
     }
   }
 
+  const handleStartReceive = async (code: string, outputDir: string) => {
+    setPending(true)
+    setAppError('')
+    setConnectionCode(code)
+    try {
+      const transferID = await clientRef.current.startReceive(code, outputDir)
+      setUpdate({ transferID, state: 'PREPARING' })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Lỗi khi bắt đầu phiên nhận.'
+      setAppError(message)
+      throw err
+    } finally {
+      setPending(false)
+    }
+  }
+
+  const handleCancel = async () => {
+    if (!update?.transferID) return
+    try {
+      await clientRef.current.cancelTransfer(update.transferID)
+    } catch (err) {
+      setAppError(err instanceof Error ? err.message : 'Không thể hủy phiên.')
+    }
+  }
+
+  const handleDecideReceive = async (accept: boolean) => {
+    if (!update?.transferID || !update.receiveOffer) return
+    const offerID = update.receiveOffer.offerID
+    if (clientRef.current.decideReceive) {
+      try {
+        await clientRef.current.decideReceive(update.transferID, offerID, accept)
+      } catch (err) {
+        setAppError(err instanceof Error ? err.message : 'Không thể gửi quyết định xác nhận.')
+      }
+    } else {
+      // In mock without explicit decideReceive, accept continues or cancel stops
+      if (!accept) {
+        await handleCancel()
+      }
+    }
+  }
+
+  const handleReset = () => {
+    setUpdate(undefined)
+    setConnectionCode('')
+    setAppError('')
+  }
+
+  const handleModeChange = (newMode: 'send' | 'receive') => {
+    if (busy) return
+    setMode(newMode)
+    handleReset()
+  }
+
   return (
     <main className="shell">
-      <header className="masthead">
-        <div className="wordmark">
-          <span className="mark" aria-hidden="true">↔</span>
-          <span>CrocCoc</span>
-        </div>
-        <span className="tag">Bản khởi tạo</span>
-      </header>
+      <Header hostTitle={hostTitle} crocInfo={crocInfo} isDesktop={isDesktop} />
 
       <section className="intro" aria-labelledby="title">
-        <p className="overline">CROC TRÊN DESKTOP</p>
-        <h1 id="title">Gửi và nhận tệp</h1>
-        <p>{host}</p>
+        <p className="overline">TRUYỀN TỆP NGANG HÀNG CROC</p>
+        <h1 id="title">Chuyển dữ liệu nhanh & an toàn</h1>
+        <p className="intro-desc">
+          Truyền tệp và thư mục trực tiếp giữa 2 máy tính mà không cần tải lên máy chủ trung gian.
+        </p>
       </section>
 
-      <section className="panel" aria-label="Mô phỏng luồng truyền tệp">
-        <div className="switcher" role="group" aria-label="Luồng mô phỏng">
-          <button type="button" aria-pressed={mode === 'send'} disabled={busy} onClick={() => { setMode('send'); setUpdate(undefined); setSampleCode(''); setError('') }}>↑ Gửi</button>
-          <button type="button" aria-pressed={mode === 'receive'} disabled={busy} onClick={() => { setMode('receive'); setUpdate(undefined); setSampleCode(''); setError('') }}>↓ Nhận</button>
-        </div>
-        <div className="details">
-          <h2>{mode === 'send' ? 'Gửi tệp mẫu' : 'Nhận tệp mẫu'}</h2>
-          <p>{mode === 'send' ? 'Máy bên kia dùng mã kết nối để nhận tệp.' : 'Dùng mã mẫu để xem trạng thái của luồng nhận.'}</p>
-          <p className="placeholder">{mode === 'send' ? 'Tệp mẫu · tai-lieu-mau.pdf' : 'Thư mục mô phỏng · Downloads'}</p>
-          <div className="controls">
-            <button type="button" className="primary" disabled={busy} onClick={() => void simulate()}>
-              {mode === 'send' ? 'Mô phỏng gửi' : 'Mô phỏng nhận'}
-            </button>
-            {isRunning(state) && update && (
-              <button type="button" className="cancel" onClick={() => void mock.cancelTransfer(update.transferID)}>Hủy mô phỏng</button>
-            )}
-          </div>
-          <p className="status" role="status"><span aria-hidden="true" />{stateLabel[state]}</p>
-          {sampleCode && <p className="sample">Mã giả lập <code>{sampleCode}</code></p>}
-          {error && <p role="alert">{error}</p>}
+      {/* Main interaction panel */}
+      <section className="panel" aria-label="Khu vực truyền tệp">
+        <ModeSwitcher mode={mode} onModeChange={handleModeChange} disabled={busy} />
+
+        <div className="panel-body">
+          {appError && (
+            <div className="error-alert top-alert" role="alert">
+              <span className="error-icon">⚠</span>
+              <span>{appError}</span>
+              <button
+                type="button"
+                className="btn-close-alert"
+                onClick={() => setAppError('')}
+                aria-label="Đóng thông báo lỗi"
+              >
+                ✕
+              </button>
+            </div>
+          )}
+
+          {mode === 'send' ? (
+            <SendPanel
+              update={update}
+              connectionCode={connectionCode}
+              busy={busy}
+              isMock={!isDesktop || useMock}
+              onStartSend={handleStartSend}
+              onCancel={handleCancel}
+              onReset={handleReset}
+            />
+          ) : (
+            <ReceivePanel
+              update={update}
+              busy={busy}
+              isMock={!isDesktop || useMock}
+              onStartReceive={handleStartReceive}
+              onDecideReceive={handleDecideReceive}
+              onCancel={handleCancel}
+              onReset={handleReset}
+            />
+          )}
         </div>
       </section>
-      <footer>Chế độ mô phỏng. Không gửi, nhận hay ghi tệp thật.</footer>
+
+      {/* Footer & Mode switcher for development / demo */}
+      <footer className="footer">
+        <div className="footer-info">
+          <span>CrocCoc Desktop v0.1.0 • Chuẩn truyền Croc PAKE</span>
+          {isDesktop && (
+            <button
+              type="button"
+              className="btn-toggle-mock"
+              onClick={() => {
+                setUseMock(!useMock)
+                handleReset()
+              }}
+            >
+              {useMock ? 'Chuyển sang Engine thật' : 'Chuyển sang Chế độ mô phỏng'}
+            </button>
+          )}
+        </div>
+      </footer>
     </main>
   )
 }

@@ -6,6 +6,7 @@ interface WailsApp {
   StartSend(paths: string[]): Promise<string>
   StartReceive(code: string, outputDir: string): Promise<string>
   CancelTransfer(transferID: string): Promise<boolean>
+  DecideReceive?(transferID: string, offerID: string, accept: boolean): Promise<boolean>
 }
 
 interface WailsHost {
@@ -24,6 +25,9 @@ export function getDesktopClient(host: WailsHost = window as Window & WailsHost)
     startSend: (paths) => binding.StartSend(paths),
     startReceive: (code, outputDir) => binding.StartReceive(code, outputDir),
     cancelTransfer: (id) => binding.CancelTransfer(id),
+    decideReceive: binding.DecideReceive
+      ? (transferID, offerID, accept) => binding.DecideReceive!(transferID, offerID, accept)
+      : undefined,
     subscribe: (handler) => eventsOn.call(runtime, TRANSFER_UPDATE, handler),
   }
 }
