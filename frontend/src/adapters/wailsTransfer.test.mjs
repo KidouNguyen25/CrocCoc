@@ -38,3 +38,45 @@ test('desktop adapter preserves binding arguments and transfer event', async () 
   assert.deepEqual(events, [update])
   assert.deepEqual(calls, [['file with space.txt'], ['sample-code', 'Downloads'], 'receive-id', 'transfer:update'])
 })
+
+test('desktop path selection uses the native Wails binding', async () => {
+  const kinds = []
+  const host = {
+    go: { main: { App: {
+      GetCrocInfo: async () => ({ available: true }),
+      StartSend: async () => 'id',
+      StartReceive: async () => 'id',
+      CancelTransfer: async () => true,
+      SelectPaths: async (kind) => {
+        kinds.push(kind)
+        return kind === 'sendFiles' ? ['C:\\data\\report.txt'] : ['C:\\data']
+      },
+    } } },
+    runtime: { EventsOn: () => () => {} },
+  }
+  const client = getDesktopClient(host)
+  assert.deepEqual(await client.selectPaths('sendFiles'), ['C:\\data\\report.txt'])
+  assert.deepEqual(await client.selectPaths('sendDirectory'), ['C:\\data'])
+  assert.deepEqual(await client.selectPaths('receiveDirectory'), ['C:\\data'])
+  assert.deepEqual(kinds, ['sendFiles', 'sendDirectory', 'receiveDirectory'])
+})
+
+test('desktop adapter delegates CopySendCode and GetTransferSnapshot', async () => {
+  const copied = []
+  const host = {
+    go: { main: { App: {
+      GetCrocInfo: async () => ({ available: true }),
+      StartSend: async () => 'id',
+      StartReceive: async () => 'id',
+      CancelTransfer: async () => true,
+      CopySendCode: async (id) => { copied.push(id) },
+      GetTransferSnapshot: async (id) => (id === 'send-1' ? { transferID: 'send-1', revision: 2, state: 'WAITING_FOR_PEER' } : null),
+    } } },
+    runtime: { EventsOn: () => () => {} },
+  }
+  const client = getDesktopClient(host)
+  await client.copySendCode('send-1')
+  assert.deepEqual(copied, ['send-1'])
+  assert.deepEqual(await client.getTransferSnapshot('send-1'), { transferID: 'send-1', revision: 2, state: 'WAITING_FOR_PEER' })
+  assert.equal(await client.getTransferSnapshot('missing'), null)
+})

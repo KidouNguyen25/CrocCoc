@@ -1,3 +1,4 @@
+import { useEffect } from 'react'
 import type { ReceiveOffer } from '../transfer.ts'
 import { formatBytes } from '../utils/formatters.ts'
 
@@ -8,15 +9,30 @@ interface ReceiveOfferDialogProps {
 }
 
 export function ReceiveOfferDialog({ offer, onDecide, disabled = false }: ReceiveOfferDialogProps) {
-  const { fileCount, totalBytes, items } = offer
+  const { fileCount, totalBytes, items, expiresAt } = offer
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !disabled) {
+        onDecide(false)
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [disabled, onDecide])
+
+  const expiryLabel = expiresAt
+    ? new Date(expiresAt).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    : ''
 
   return (
-    <div className="offer-dialog-card" role="dialog" aria-labelledby="offer-title">
+    <div className="offer-dialog-card" role="dialog" aria-modal="true" aria-labelledby="offer-title">
       <div className="offer-header">
         <span className="offer-badge">YÊU CẦU TRUYỀN TỆP</span>
         <h3 id="offer-title">Bên gửi muốn gửi cho bạn:</h3>
         <p className="offer-summary">
           <strong>{fileCount}</strong> tệp / thư mục • Tổng dung lượng: <strong>{formatBytes(totalBytes)}</strong>
+          {expiryLabel && <> • Hết hạn lúc: <strong>{expiryLabel}</strong></>}
         </p>
       </div>
 
@@ -26,7 +42,7 @@ export function ReceiveOfferDialog({ offer, onDecide, disabled = false }: Receiv
             <li key={index} className="offer-item">
               <span className="offer-item-icon">{item.type === 'directory' ? '📁' : '📄'}</span>
               <span className="offer-item-path" title={item.path}>{item.path}</span>
-              {item.sizeBytes && (
+              {item.sizeBytes !== undefined && item.sizeBytes !== '' && (
                 <span className="offer-item-size">{formatBytes(item.sizeBytes)}</span>
               )}
             </li>
@@ -35,7 +51,7 @@ export function ReceiveOfferDialog({ offer, onDecide, disabled = false }: Receiv
       </div>
 
       <p className="offer-notice">
-        Vui lòng xác nhận bạn tin tưởng nguồn gửi này trước khi tải dữ liệu về máy.
+        Vui lòng xác nhận bạn tin tưởng nguồn gửi này trước khi tải dữ liệu về máy. Nhấn Esc để từ chối.
       </p>
 
       <div className="offer-actions">
@@ -44,6 +60,7 @@ export function ReceiveOfferDialog({ offer, onDecide, disabled = false }: Receiv
           className="btn-primary btn-accept"
           onClick={() => onDecide(true)}
           disabled={disabled}
+          autoFocus
         >
           ✓ Đồng ý nhận tệp
         </button>

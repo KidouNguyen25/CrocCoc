@@ -1,6 +1,5 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { TransferUpdate } from '../transfer.ts'
-import { isRunning } from '../transfer.ts'
 import { SAMPLE_CODE } from '../mockTransfer.ts'
 import { TransferProgress } from './TransferProgress.tsx'
 import { ReceiveOfferDialog } from './ReceiveOfferDialog.tsx'
@@ -10,6 +9,7 @@ interface ReceivePanelProps {
   busy: boolean
   isMock: boolean
   onStartReceive: (code: string, outputDir: string) => Promise<void>
+  onSelectReceiveDirectory?: () => Promise<string[]>
   onDecideReceive?: (accept: boolean) => Promise<void>
   onCancel: () => void
   onReset: () => void
@@ -20,6 +20,7 @@ export function ReceivePanel({
   busy,
   isMock,
   onStartReceive,
+  onSelectReceiveDirectory,
   onDecideReceive,
   onCancel,
   onReset,
@@ -29,8 +30,11 @@ export function ReceivePanel({
   const [errorMsg, setErrorMsg] = useState('')
   const [folderCopied, setFolderCopied] = useState(false)
 
+  useEffect(() => {
+    if (!isMock) setOutputDir((dir) => (dir === 'Downloads' ? '' : dir))
+  }, [isMock])
+
   const state = update?.state ?? 'IDLE'
-  const active = isRunning(state)
   const isAwaiting = state === 'AWAITING_ACCEPTANCE' && !!update?.receiveOffer
 
   const handlePasteCode = async () => {
@@ -62,8 +66,22 @@ export function ReceivePanel({
     setErrorMsg('')
     try {
       await onStartReceive(trimmedCode, trimmedDir)
+      setCode('') // do not keep the secret in the input after submission
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Không thể bắt đầu phiên nhận.')
+    }
+  }
+
+  const handleSelectFolder = async () => {
+    if (!onSelectReceiveDirectory) return
+    try {
+      const paths = await onSelectReceiveDirectory()
+      if (paths.length > 0) {
+        setOutputDir(paths[0])
+        setErrorMsg('')
+      }
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Không thể chọn thư mục nhận.')
     }
   }
 
@@ -90,7 +108,7 @@ export function ReceivePanel({
         <form className="receive-form" onSubmit={handleStart}>
           <div className="form-group">
             <label htmlFor="connection-code-input" className="form-label">
-              MÃ KẾT NỐI (CONNECTION CODE)
+              MÃ KẾT NỐI
             </label>
             <div className="input-with-button">
               <input
@@ -137,17 +155,24 @@ export function ReceivePanel({
             <label htmlFor="output-dir-input" className="form-label">
               THƯ MỤC LƯU TỆP NHẬN
             </label>
-            <input
-              id="output-dir-input"
-              type="text"
-              className="text-input"
-              placeholder="Đường dẫn thư mục lưu (mặc định: Downloads)"
-              value={outputDir}
-              onChange={(e) => setOutputDir(e.target.value)}
-              disabled={busy}
-            />
+            <div className="input-with-button">
+              <input
+                id="output-dir-input"
+                type="text"
+                className="text-input"
+                placeholder={onSelectReceiveDirectory ? 'Chọn thư mục lưu trên Windows' : 'Đường dẫn thư mục lưu (VD: Downloads)'}
+                value={outputDir}
+                onChange={(e) => setOutputDir(e.target.value)}
+                disabled={busy}
+              />
+              {onSelectReceiveDirectory && (
+                <button type="button" className="btn-secondary" onClick={() => void handleSelectFolder()} disabled={busy}>
+                  📁 Chọn thư mục
+                </button>
+              )}
+            </div>
             <p className="field-hint">
-              Các tệp nhận về sẽ được lưu và kiểm tra mã băm SHA-256 an toàn tại thư mục này.
+              Các tệp nhận về được tải vào vùng tạm riêng, kiểm tra toàn vẹn và chỉ ghi mới (không ghi đè) tại thư mục này.
             </p>
           </div>
 
@@ -191,11 +216,12 @@ export function ReceivePanel({
           <TransferProgress
             update={update}
             direction="receive"
+            isDesktop={!isMock}
             onCancel={onCancel}
             onReset={handleResetAll}
           />
 
-          {/* Post-completion extra info: Destination directory and Open folder */}
+          {/* Post-completion extra info: Destination directory and copy path */}
           {state === 'COMPLETED' && (
             <div className="destination-card">
               <div className="dest-icon">📂</div>

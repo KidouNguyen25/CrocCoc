@@ -55,6 +55,16 @@ export interface TransferUpdate {
   cleanupPending?: boolean
 }
 
+export interface SessionSnapshot {
+  transferID: string
+  revision: number
+  state: TransferState
+  partialOutput?: boolean
+  cleanupPending?: boolean
+}
+
+export type PathSelectionKind = 'sendFiles' | 'sendDirectory' | 'receiveDirectory'
+
 export interface TransferClient {
   getCrocInfo(): Promise<CrocInfo>
   startSend(paths: string[]): Promise<string>
@@ -62,6 +72,31 @@ export interface TransferClient {
   cancelTransfer(transferID: string): Promise<boolean>
   decideReceive?(transferID: string, offerID: string, accept: boolean): Promise<boolean>
   subscribe(handler: (update: TransferUpdate) => void): () => void
+  selectPaths?(kind: PathSelectionKind): Promise<string[]>
+  copySendCode?(transferID: string): Promise<void>
+  getTransferSnapshot?(transferID: string): Promise<SessionSnapshot | null>
+}
+
+export function preserveStartedTransferUpdate(
+  current: TransferUpdate | undefined,
+  transferID: string,
+): TransferUpdate {
+  return current?.transferID === transferID
+    ? current
+    : { transferID, state: 'PREPARING' }
+}
+
+// A delayed or duplicate event must never rewind a live session or its terminal state.
+export function acceptTransferUpdate(
+  current: TransferUpdate | undefined,
+  next: TransferUpdate,
+): TransferUpdate {
+  if (!current) return next
+  if (current.transferID !== next.transferID) return current
+  const terminal = ['COMPLETED', 'FAILED', 'CANCELLED']
+  if (terminal.includes(current.state)) return current
+  if (current.revision !== undefined && (next.revision ?? 0) <= current.revision) return current
+  return next
 }
 
 export function isRunning(state: TransferState): boolean {

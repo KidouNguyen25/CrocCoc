@@ -1,6 +1,5 @@
 import { useState, useRef } from 'react'
 import type { TransferUpdate } from '../transfer.ts'
-import { isRunning } from '../transfer.ts'
 import { FileList } from './FileList.tsx'
 import type { SelectedFileItem } from './FileList.tsx'
 import { TransferProgress } from './TransferProgress.tsx'
@@ -11,6 +10,8 @@ interface SendPanelProps {
   busy: boolean
   isMock: boolean
   onStartSend: (paths: string[]) => Promise<void>
+  onSelectPaths?: (kind: 'sendFiles' | 'sendDirectory') => Promise<string[]>
+  onCopySendCode?: () => Promise<void>
   onCancel: () => void
   onReset: () => void
 }
@@ -21,6 +22,8 @@ export function SendPanel({
   busy,
   isMock,
   onStartSend,
+  onSelectPaths,
+  onCopySendCode,
   onCancel,
   onReset,
 }: SendPanelProps) {
@@ -33,7 +36,6 @@ export function SendPanel({
   const folderInputRef = useRef<HTMLInputElement>(null)
 
   const state = update?.state ?? 'IDLE'
-  const active = isRunning(state)
 
   const handleFilesAdded = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files || e.target.files.length === 0) return
@@ -52,7 +54,6 @@ export function SendPanel({
   const handleFolderAdded = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files || e.target.files.length === 0) return
     const files = Array.from(e.target.files)
-    // Extract root folder name
     const firstRel = files[0].webkitRelativePath || ''
     const folderName = firstRel.split('/')[0] || 'Thư mục'
     const totalSize = files.reduce((sum, f) => sum + f.size, 0)
@@ -90,6 +91,32 @@ export function SendPanel({
     setErrorMsg('')
   }
 
+  const handleNativeSelect = async (kind: 'sendFiles' | 'sendDirectory') => {
+    if (!onSelectPaths) return
+    try {
+      const paths = await onSelectPaths(kind)
+      if (paths.length === 0) return // user cancelled picker
+      setItems((existing) => {
+        const selected = new Set(existing.map((item) => item.path.toLowerCase()))
+        const additions: SelectedFileItem[] = []
+        for (const path of paths) {
+          if (!path || selected.has(path.toLowerCase())) continue
+          selected.add(path.toLowerCase())
+          additions.push({
+            id: `${path}-${Date.now()}-${additions.length}`,
+            path,
+            name: path.split(/[/\\]/).pop() || path,
+            isDirectory: kind === 'sendDirectory',
+          })
+        }
+        return [...existing, ...additions]
+      })
+      setErrorMsg('')
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Không thể chọn đường dẫn.')
+    }
+  }
+
   const handleRemoveItem = (id: string) => {
     setItems((prev) => prev.filter((item) => item.id !== id))
   }
@@ -102,6 +129,10 @@ export function SendPanel({
     e.preventDefault()
     setIsDragOver(false)
     if (busy) return
+    if (onSelectPaths) {
+      setErrorMsg('Hãy dùng nút Chọn tệp/Chọn thư mục để lấy đường dẫn thật từ Windows.')
+      return
+    }
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
       const dropped: SelectedFileItem[] = Array.from(e.dataTransfer.files).map((f) => ({
         id: `${f.name}-${f.size}-${Date.now()}-${Math.random()}`,
@@ -169,13 +200,13 @@ export function SendPanel({
             <div className="dropzone-icon" aria-hidden="true">
               📦
             </div>
-            <h3 className="dropzone-title">Kéo thả tệp hoặc thư mục vào đây</h3>
+            <h3 className="dropzone-title">{onSelectPaths ? 'Chọn tệp hoặc thư mục trên máy tính' : 'Kéo thả tệp hoặc thư mục vào đây'}</h3>
             <p className="dropzone-sub">Hỗ trợ gửi nhiều tệp hoặc nguyên thư mục cùng lúc</p>
             <div className="dropzone-buttons">
               <button
                 type="button"
                 className="btn-select"
-                onClick={() => fileInputRef.current?.click()}
+                onClick={() => onSelectPaths ? void handleNativeSelect('sendFiles') : fileInputRef.current?.click()}
                 disabled={busy}
               >
                 📄 Chọn tệp
@@ -183,7 +214,7 @@ export function SendPanel({
               <button
                 type="button"
                 className="btn-select"
-                onClick={() => folderInputRef.current?.click()}
+                onClick={() => onSelectPaths ? void handleNativeSelect('sendDirectory') : folderInputRef.current?.click()}
                 disabled={busy}
               >
                 📁 Chọn thư mục
@@ -278,6 +309,8 @@ export function SendPanel({
           update={update}
           connectionCode={connectionCode}
           direction="send"
+          isDesktop={!isMock}
+          onCopySendCode={onCopySendCode}
           onCancel={onCancel}
           onReset={handleResetAll}
         />

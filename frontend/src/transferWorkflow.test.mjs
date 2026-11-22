@@ -87,3 +87,17 @@ test('STATE_DESCRIPTIONS contains clear guidance for each state', () => {
     assert(STATE_DESCRIPTIONS[s].length > 10)
   }
 })
+
+test('startup does not overwrite early native events and ignores stale revisions', async () => {
+  const { acceptTransferUpdate, preserveStartedTransferUpdate } = await import('./transfer.ts')
+  const waiting = { transferID: 'send-1', revision: 2, state: 'WAITING_FOR_PEER', connectionCode: 'secret-code' }
+  const started = preserveStartedTransferUpdate(waiting, 'send-1')
+  assert.equal(started, waiting)
+  assert.deepEqual(preserveStartedTransferUpdate(waiting, 'send-2'), { transferID: 'send-2', state: 'PREPARING' })
+  assert.equal(acceptTransferUpdate(waiting, { transferID: 'send-1', revision: 1, state: 'PREPARING' }), waiting)
+  assert.equal(acceptTransferUpdate(waiting, { ...waiting, revision: 2, state: 'TRANSFERRING' }), waiting)
+  assert.equal(acceptTransferUpdate(waiting, { transferID: 'other', revision: 3, state: 'FAILED' }), waiting)
+  const completed = acceptTransferUpdate(waiting, { transferID: 'send-1', revision: 4, state: 'COMPLETED' })
+  assert.equal(completed.state, 'COMPLETED')
+  assert.equal(acceptTransferUpdate(completed, { transferID: 'send-1', revision: 5, state: 'FAILED' }), completed)
+})

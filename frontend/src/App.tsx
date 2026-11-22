@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef, useMemo } from 'react'
 import { getDesktopClient } from './adapters/wailsTransfer.ts'
 import { createMockTransferClient } from './mockTransfer.ts'
-import { isRunning } from './transfer.ts'
+import { acceptTransferUpdate, isRunning, preserveStartedTransferUpdate } from './transfer.ts'
 import type { CrocInfo, TransferClient, TransferUpdate } from './transfer.ts'
 import { Header } from './components/Header.tsx'
 import { ModeSwitcher } from './components/ModeSwitcher.tsx'
@@ -10,6 +10,7 @@ import { ReceivePanel } from './components/ReceivePanel.tsx'
 
 export function App() {
   const [mode, setMode] = useState<'send' | 'receive'>('send')
+  const [hasDesktopRuntime, setHasDesktopRuntime] = useState(false)
   const [isDesktop, setIsDesktop] = useState(false)
   const [useMock, setUseMock] = useState(false)
   const [crocInfo, setCrocInfo] = useState<CrocInfo>()
@@ -22,10 +23,14 @@ export function App() {
   // Create persistent mock client instance for browser preview
   const mockClient = useMemo(() => createMockTransferClient(), [])
   const clientRef = useRef<TransferClient>(mockClient)
+  const activeTransferID = useRef<string | undefined>(undefined)
+  const awaitingStart = useRef(false)
+  const earlyUpdates = useRef(new Map<string, TransferUpdate>())
 
   // Identify runtime environment and active client
   useEffect(() => {
     const desktop = getDesktopClient()
+    setHasDesktopRuntime(Boolean(desktop))
     if (desktop && !useMock) {
       setIsDesktop(true)
       clientRef.current = desktop
@@ -51,12 +56,20 @@ export function App() {
 
     // Subscribe to transfer events
     const unsubscribe = clientRef.current.subscribe((event) => {
-      setUpdate(event)
+      if (!event.transferID) return
+      if (awaitingStart.current && !activeTransferID.current) {
+        earlyUpdates.current.set(
+          event.transferID,
+          acceptTransferUpdate(earlyUpdates.current.get(event.transferID), event),
+        )
+        return
+      }
+      if (event.transferID !== activeTransferID.current) return
+      setUpdate((current) => acceptTransferUpdate(current, event))
       if (event.connectionCode) {
         setConnectionCode(event.connectionCode)
-      }
-      if (event.state === 'CANCELLED' || event.state === 'FAILED') {
-        // Keep connection code if already generated, unless cancelled before generation
+      } else if (event.state !== 'WAITING_FOR_PEER' && event.state !== 'PREPARING') {
+        setConnectionCode('')
       }
     })
 
@@ -68,36 +81,60 @@ export function App() {
   const state = update?.state ?? 'IDLE'
   const busy = pending || isRunning(state)
 
-  const handleStartSend = async (paths: string[]) => {
+  const beginTransfer = async (request: () => Promise<string>, fallbackError: string) => {
+    // The native engine can emit a WAITING/FAILED event before Start* resolves.
+    // Buffer it by ID and never overwrite it with a synthetic PREPARING state.
+    awaitingStart.current = true
+    activeTransferID.current = undefined
+    earlyUpdates.current.clear()
     setPending(true)
     setAppError('')
     setConnectionCode('')
+    setUpdate(undefined)
     try {
-      const transferID = await clientRef.current.startSend(paths)
-      setUpdate({ transferID, state: 'PREPARING' })
+      const transferID = await request()
+      activeTransferID.current = transferID
+      awaitingStart.current = false
+      const buffered = earlyUpdates.current.get(transferID)
+      earlyUpdates.current.clear()
+      setUpdate((current) => {
+        const initial = preserveStartedTransferUpdate(current, transferID)
+        return buffered ? acceptTransferUpdate(initial, buffered) : initial
+      })
+      if (buffered?.connectionCode) setConnectionCode(buffered.connectionCode)
+      if (!buffered && clientRef.current.getTransferSnapshot) {
+        void clientRef.current.getTransferSnapshot(transferID).then((snapshot) => {
+          if (!snapshot || activeTransferID.current !== transferID) return
+          setUpdate((current) => acceptTransferUpdate(current, snapshot))
+        }).catch(() => {})
+      }
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Lỗi khi bắt đầu phiên gửi.'
-      setAppError(message)
+      setAppError(err instanceof Error ? err.message : fallbackError)
       throw err
     } finally {
+      awaitingStart.current = false
+      earlyUpdates.current.clear()
       setPending(false)
     }
   }
 
-  const handleStartReceive = async (code: string, outputDir: string) => {
-    setPending(true)
-    setAppError('')
-    setConnectionCode(code)
-    try {
-      const transferID = await clientRef.current.startReceive(code, outputDir)
-      setUpdate({ transferID, state: 'PREPARING' })
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Lỗi khi bắt đầu phiên nhận.'
-      setAppError(message)
-      throw err
-    } finally {
-      setPending(false)
+  const handleStartSend = (paths: string[]) =>
+    beginTransfer(() => clientRef.current.startSend(paths), 'Lỗi khi bắt đầu phiên gửi.')
+
+  const handleStartReceive = (code: string, outputDir: string) =>
+    beginTransfer(() => clientRef.current.startReceive(code, outputDir), 'Lỗi khi bắt đầu phiên nhận.')
+
+  const handleSelectPaths = (kind: 'sendFiles' | 'sendDirectory' | 'receiveDirectory') => {
+    const selectPaths = clientRef.current.selectPaths
+    if (!selectPaths) return Promise.reject(new Error('Không có hộp thoại chọn đường dẫn của desktop.'))
+    return selectPaths(kind)
+  }
+
+  const handleCopySendCode = async () => {
+    if (!update?.transferID || !clientRef.current.copySendCode) {
+      throw new Error('COPY_UNSAFE: không thể sao chép mã an toàn trên thiết bị này.')
     }
+    await clientRef.current.copySendCode(update.transferID)
   }
 
   const handleCancel = async () => {
@@ -118,15 +155,15 @@ export function App() {
       } catch (err) {
         setAppError(err instanceof Error ? err.message : 'Không thể gửi quyết định xác nhận.')
       }
-    } else {
-      // In mock without explicit decideReceive, accept continues or cancel stops
-      if (!accept) {
-        await handleCancel()
-      }
+    } else if (!accept) {
+      await handleCancel()
     }
   }
 
   const handleReset = () => {
+    activeTransferID.current = undefined
+    awaitingStart.current = false
+    earlyUpdates.current.clear()
     setUpdate(undefined)
     setConnectionCode('')
     setAppError('')
@@ -143,10 +180,10 @@ export function App() {
       <Header hostTitle={hostTitle} crocInfo={crocInfo} isDesktop={isDesktop} />
 
       <section className="intro" aria-labelledby="title">
-        <p className="overline">TRUYỀN TỆP NGANG HÀNG CROC</p>
+        <p className="overline">TRUYỀN TỆP MÃ HÓA CROC PAKE</p>
         <h1 id="title">Chuyển dữ liệu nhanh & an toàn</h1>
         <p className="intro-desc">
-          Truyền tệp và thư mục trực tiếp giữa 2 máy tính mà không cần tải lên máy chủ trung gian.
+          Nội dung tệp được mã hóa đầu cuối theo chuẩn Croc PAKE. Bản MVP truyền qua máy chủ relay trung gian (relay quan sát được metadata mạng và thời điểm, không đọc được nội dung).
         </p>
       </section>
 
@@ -177,6 +214,8 @@ export function App() {
               busy={busy}
               isMock={!isDesktop || useMock}
               onStartSend={handleStartSend}
+              onSelectPaths={isDesktop && !useMock ? handleSelectPaths : undefined}
+              onCopySendCode={isDesktop && !useMock ? handleCopySendCode : undefined}
               onCancel={handleCancel}
               onReset={handleReset}
             />
@@ -186,6 +225,7 @@ export function App() {
               busy={busy}
               isMock={!isDesktop || useMock}
               onStartReceive={handleStartReceive}
+              onSelectReceiveDirectory={isDesktop && !useMock ? () => handleSelectPaths('receiveDirectory') : undefined}
               onDecideReceive={handleDecideReceive}
               onCancel={handleCancel}
               onReset={handleReset}
@@ -198,7 +238,7 @@ export function App() {
       <footer className="footer">
         <div className="footer-info">
           <span>CrocCoc Desktop v0.1.0 • Chuẩn truyền Croc PAKE</span>
-          {isDesktop && (
+          {hasDesktopRuntime && (
             <button
               type="button"
               className="btn-toggle-mock"

@@ -1,5 +1,5 @@
 import { TRANSFER_UPDATE } from '../transfer.ts'
-import type { CrocInfo, TransferClient, TransferUpdate } from '../transfer.ts'
+import type { CrocInfo, PathSelectionKind, SessionSnapshot, TransferClient, TransferUpdate } from '../transfer.ts'
 
 interface WailsApp {
   GetCrocInfo(): Promise<CrocInfo>
@@ -7,6 +7,9 @@ interface WailsApp {
   StartReceive(code: string, outputDir: string): Promise<string>
   CancelTransfer(transferID: string): Promise<boolean>
   DecideReceive?(transferID: string, offerID: string, accept: boolean): Promise<boolean>
+  SelectPaths?(kind: PathSelectionKind): Promise<string[]>
+  CopySendCode?(transferID: string): Promise<void>
+  GetTransferSnapshot?(transferID: string): Promise<SessionSnapshot | null>
 }
 
 interface WailsHost {
@@ -29,5 +32,10 @@ export function getDesktopClient(host: WailsHost = window as Window & WailsHost)
       ? (transferID, offerID, accept) => binding.DecideReceive!(transferID, offerID, accept)
       : undefined,
     subscribe: (handler) => eventsOn.call(runtime, TRANSFER_UPDATE, handler),
+    selectPaths: binding.SelectPaths ? (kind) => binding.SelectPaths!(kind) : undefined,
+    copySendCode: binding.CopySendCode ? (transferID) => binding.CopySendCode!(transferID) : undefined,
+    getTransferSnapshot: binding.GetTransferSnapshot
+      ? (transferID) => binding.GetTransferSnapshot!(transferID)
+      : undefined,
   }
 }

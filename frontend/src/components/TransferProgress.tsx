@@ -13,6 +13,8 @@ interface TransferProgressProps {
   update?: TransferUpdate
   connectionCode?: string
   direction: 'send' | 'receive'
+  isDesktop?: boolean
+  onCopySendCode?: () => Promise<void>
   onCancel: () => void
   onReset: () => void
 }
@@ -21,10 +23,13 @@ export function TransferProgress({
   update,
   connectionCode,
   direction,
+  isDesktop = false,
+  onCopySendCode,
   onCancel,
   onReset,
 }: TransferProgressProps) {
   const [copied, setCopied] = useState(false)
+  const [copyError, setCopyError] = useState('')
 
   if (!update || update.state === 'IDLE') return null
 
@@ -37,6 +42,8 @@ export function TransferProgress({
     currentFile,
     message,
     error,
+    partialOutput,
+    cleanupPending,
   } = update
 
   const active = isRunning(state)
@@ -45,20 +52,32 @@ export function TransferProgress({
 
   const handleCopyCode = async () => {
     if (!codeToShow) return
+    setCopyError('')
+    // On desktop, never copy secrets through WebView clipboard APIs (CC-TM-001).
+    if (isDesktop) {
+      if (!onCopySendCode) {
+        setCopyError('Chưa xác minh được chế độ sao chép an toàn. Vui lòng đọc mã trực tiếp trên màn hình.')
+        return
+      }
+      try {
+        await onCopySendCode()
+        setCopied(true)
+        setTimeout(() => setCopied(false), 2000)
+      } catch (err) {
+        setCopyError(
+          err instanceof Error
+            ? err.message
+            : 'Không thể sao chép mã an toàn (COPY_UNSAFE). Vui lòng đọc mã trực tiếp trên màn hình.',
+        )
+      }
+      return
+    }
     try {
       await navigator.clipboard.writeText(codeToShow)
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
     } catch {
-      // Fallback for environments where clipboard API is restricted
-      const textarea = document.createElement('textarea')
-      textarea.value = codeToShow
-      document.body.appendChild(textarea)
-      textarea.select()
-      document.execCommand('copy')
-      document.body.removeChild(textarea)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
+      setCopyError('Không thể sao chép trong chế độ xem trước. Vui lòng chép thủ công.')
     }
   }
 
@@ -90,20 +109,26 @@ export function TransferProgress({
       {/* Code Display for Sender in WAITING_FOR_PEER */}
       {direction === 'send' && codeToShow && (state === 'WAITING_FOR_PEER' || state === 'PREPARING') && (
         <div className="code-box">
-          <div className="code-label">MÃ KẾT NỐI (CONNECTION CODE):</div>
+          <div className="code-label">MÃ KẾT NỐI:</div>
           <div className="code-row">
             <code className="code-value">{codeToShow}</code>
             <button
               type="button"
               className={`btn-copy ${copied ? 'copied' : ''}`}
-              onClick={handleCopyCode}
-              title="Sao chép mã vào clipboard"
+              onClick={() => void handleCopyCode()}
+              title="Sao chép mã an toàn (loại trừ lịch sử clipboard)"
             >
               {copied ? '✓ Đã sao chép' : '📋 Sao chép mã'}
             </button>
           </div>
+          {copyError && (
+            <div className="error-alert" role="alert" style={{ marginTop: '0.5rem' }}>
+              <span className="error-icon">⚠</span>
+              <span>{copyError}</span>
+            </div>
+          )}
           <p className="code-hint">
-            Chia sẻ mã này cho người nhận. Quá trình truyền tệp sẽ tự động kích hoạt ngay khi người nhận nhập mã.
+            Chia sẻ mã này qua kênh tin cậy cho người nhận. Quá trình truyền sẽ bắt đầu ngay khi người nhận kết nối.
           </p>
         </div>
       )}
@@ -117,6 +142,7 @@ export function TransferProgress({
                 className="progress-bar-fill"
                 style={{ width: `${Math.min(100, Math.max(0, progress))}%` }}
                 role="progressbar"
+                aria-label="Tiến độ truyền tệp"
                 aria-valuenow={Math.round(progress)}
                 aria-valuemin={0}
                 aria-valuemax={100}
@@ -166,13 +192,27 @@ export function TransferProgress({
         </div>
       )}
 
+      {/* Safety warnings for partial output or pending cleanup */}
+      {partialOutput && (
+        <div className="warning-alert" role="alert">
+          <span className="error-icon">⚠</span>
+          <span>Thư mục đích có thể chứa tệp chưa hoàn chỉnh sau lỗi công bố. Hãy kiểm tra thủ công trước khi thử lại.</span>
+        </div>
+      )}
+      {cleanupPending && (
+        <div className="warning-alert" role="alert">
+          <span className="error-icon">⚠</span>
+          <span>Hệ thống chưa xác nhận dọn xong tài nguyên phiên trước. Phiên mới đang tạm khóa an toàn cho tới khi dọn hoàn tất hoặc khởi động lại ứng dụng.</span>
+        </div>
+      )}
+
       {/* Completion or Error States */}
       {state === 'COMPLETED' && (
         <div className="result-banner result-success">
           <div className="result-icon">✓</div>
           <div className="result-content">
             <h4>Truyền tệp thành công!</h4>
-            <p>Tất cả dữ liệu đã được truyền an toàn và xác thực toàn vẹn bằng SHA-256.</p>
+            <p>Tất cả dữ liệu đã được truyền mã hóa và kiểm tra toàn vẹn theo giao thức Croc.</p>
           </div>
           <button type="button" className="btn-primary" onClick={onReset}>
             {direction === 'send' ? 'Gửi tệp khác' : 'Nhận tệp khác'}
