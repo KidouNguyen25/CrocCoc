@@ -12,11 +12,12 @@ var ErrBusy = errors.New("BUSY: đang có phiên truyền chưa giải phóng t�
 // SessionSnapshot is an immutable copy of a native session's position.
 // Event publication and the API wire are integrated separately.
 type SessionSnapshot struct {
-	TransferID     string `json:"transferID"`
-	Revision       uint64 `json:"revision"`
-	State          State  `json:"state"`
-	PartialOutput  bool   `json:"partialOutput,omitempty"`
-	CleanupPending bool   `json:"cleanupPending,omitempty"`
+	TransferID     string         `json:"transferID"`
+	Revision       uint64         `json:"revision"`
+	State          State          `json:"state"`
+	Error          *TransferError `json:"error,omitempty"`
+	PartialOutput  bool           `json:"partialOutput,omitempty"`
+	CleanupPending bool           `json:"cleanupPending,omitempty"`
 }
 
 // Coordinator arbitrates transitions and cancellation under one short lock.
@@ -79,12 +80,53 @@ func (c *Coordinator) Advance(id string, next State) (SessionSnapshot, bool) {
 	}
 	c.active.State = next
 	c.active.Revision++
+	if next == Failed {
+		c.active.Error = cloneTransferError(transferError(ErrTransferFailed))
+	} else {
+		c.active.Error = nil
+	}
 	if next != AwaitingAcceptance {
 		c.offer = nil
 		c.decided = false
 		c.manifestDigest = [32]byte{}
 	}
-	return *c.active, true
+	return cloneSessionSnapshot(*c.active), true
+}
+
+// Fail transitions a session to FAILED and stores a detached error copy.
+// Calling it for an already-failed session updates its error without changing
+// the terminal state.
+func (c *Coordinator) Fail(id string, cause error) (SessionSnapshot, bool) {
+	if cause == nil {
+		cause = ErrTransferFailed
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.active == nil || c.active.TransferID != id {
+		return SessionSnapshot{}, false
+	}
+	stateChanged := false
+	if c.active.State != Failed {
+		if !CanTransition(c.active.State, Failed) {
+			return SessionSnapshot{}, false
+		}
+		c.active.State = Failed
+		stateChanged = true
+		c.offer = nil
+		c.decided = false
+		c.manifestDigest = [32]byte{}
+	}
+	failure := transferError(cause)
+	errorChanged := c.active.Error == nil ||
+		c.active.Error.Code != failure.Code ||
+		c.active.Error.Message != failure.Message
+	if errorChanged {
+		c.active.Error = cloneTransferError(failure)
+	}
+	if stateChanged || errorChanged {
+		c.active.Revision++
+	}
+	return cloneSessionSnapshot(*c.active), true
 }
 
 // SetTerminalFlags records whether published output is partial or owned
@@ -100,7 +142,7 @@ func (c *Coordinator) SetTerminalFlags(id string, partialOutput, cleanupPending 
 		c.active.CleanupPending = cleanupPending
 		c.active.Revision++
 	}
-	return *c.active, true
+	return cloneSessionSnapshot(*c.active), true
 }
 
 // Cancel attempts to acquire the cancellation gate before finalization.
@@ -118,7 +160,7 @@ func (c *Coordinator) TouchProgress(id string) (SessionSnapshot, bool) {
 		return SessionSnapshot{}, false
 	}
 	c.active.Revision++
-	return *c.active, true
+	return cloneSessionSnapshot(*c.active), true
 }
 
 // Snapshot reads the live session or most recently released terminal session.
@@ -126,10 +168,10 @@ func (c *Coordinator) Snapshot(id string) (SessionSnapshot, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.active != nil && c.active.TransferID == id {
-		return *c.active, true
+		return cloneSessionSnapshot(*c.active), true
 	}
 	if c.recent != nil && c.recent.TransferID == id {
-		return *c.recent, true
+		return cloneSessionSnapshot(*c.recent), true
 	}
 	return SessionSnapshot{}, false
 }
@@ -143,9 +185,22 @@ func (c *Coordinator) Release(id string) bool {
 		!IsTerminal(c.active.State) {
 		return false
 	}
-	snapshot := *c.active
+	snapshot := cloneSessionSnapshot(*c.active)
 	c.recent = &snapshot
 	c.active = nil
 	c.manifestDigest = [32]byte{}
 	return true
+}
+
+func cloneTransferError(value *TransferError) *TransferError {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func cloneSessionSnapshot(value SessionSnapshot) SessionSnapshot {
+	value.Error = cloneTransferError(value.Error)
+	return value
 }

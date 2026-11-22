@@ -339,3 +339,14 @@ func TestOfferTimeoutTransitionsToFailedWithOfferTimeoutCode(t *testing.T) {
 		t.Fatalf("expected FAILED with OFFER_TIMEOUT, got %+v", *updates)
 	}
 }
+
+func TestGetTransferUpdateRestoresMissedFailedErrorCCT13A(t *testing.T) {
+	service, id, _ := receiveServiceFixture(t)
+	service.finishReceiveSession(id, ErrOfferTimeout, false, false)
+
+	update, ok := service.GetTransferUpdate(id)
+	if !ok || update.State != Failed || update.Error == nil ||
+		update.Error.Code != "OFFER_TIMEOUT" || update.Error.Message != transferError(ErrOfferTimeout).Message {
+		t.Fatalf("snapshot did not restore FAILED error after missed event: %+v, %t", update, ok)
+	}
+}

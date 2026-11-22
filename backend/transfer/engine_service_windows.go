@@ -121,7 +121,7 @@ func (s *engineService) StartSend(paths []string) (string, error) {
 	}
 	waiting, ok := s.coordinator.Advance(started.TransferID, WaitingForPeer)
 	if !ok {
-		_, _ = s.coordinator.Advance(started.TransferID, Failed)
+		_, _ = s.coordinator.Fail(started.TransferID, ErrWorkerProtocol)
 		_ = s.coordinator.Release(started.TransferID)
 		_ = sources.Close()
 		return "", ErrWorkerProtocol
@@ -205,7 +205,7 @@ func (s *engineService) StartReceive(code, outputDir string) (string, error) {
 	}
 	waiting, ok := s.coordinator.Advance(started.TransferID, WaitingForPeer)
 	if !ok {
-		_, _ = s.coordinator.Advance(started.TransferID, Failed)
+		_, _ = s.coordinator.Fail(started.TransferID, ErrWorkerProtocol)
 		_ = s.coordinator.Release(started.TransferID)
 		return "", ErrWorkerProtocol
 	}
@@ -398,6 +398,7 @@ func (s *engineService) GetTransferUpdate(id string) (Update, bool) {
 		TransferID:     snapshot.TransferID,
 		Revision:       snapshot.Revision,
 		State:          snapshot.State,
+		Error:          cloneTransferError(snapshot.Error),
 		PartialOutput:  snapshot.PartialOutput,
 		CleanupPending: snapshot.CleanupPending,
 	}
@@ -559,7 +560,7 @@ func (s *engineService) failSession(id string, cause error) {
 	}
 	if current, ok := s.coordinator.Snapshot(id); ok && current.State == Cancelling {
 		if errors.Is(cause, ErrWorkerCleanupPending) {
-			if snapshot, advanced := s.coordinator.Advance(id, Failed); advanced {
+			if snapshot, advanced := s.coordinator.Fail(id, cause); advanced {
 				snapshot, _ = s.coordinator.SetTerminalFlags(id, false, true)
 				s.emitFailure(snapshot, cause)
 			}
@@ -570,7 +571,7 @@ func (s *engineService) failSession(id string, cause error) {
 		}
 		return
 	}
-	if snapshot, ok := s.coordinator.Advance(id, Failed); ok {
+	if snapshot, ok := s.coordinator.Fail(id, cause); ok {
 		if errors.Is(cause, ErrWorkerCleanupPending) {
 			snapshot, _ = s.coordinator.SetTerminalFlags(id, false, true)
 		}
@@ -609,6 +610,11 @@ func (s *engineService) finishReceiveSession(id string, cause error, partialOutp
 	}
 	if snapshot.State == Failed && cause == nil {
 		cause = ErrTransferFailed
+	}
+	if snapshot.State == Failed {
+		if failed, changed := s.coordinator.Fail(id, cause); changed {
+			snapshot = failed
+		}
 	}
 	if updated, changed := s.coordinator.SetTerminalFlags(id, partialOutput, cleanupPending); changed {
 		snapshot = updated

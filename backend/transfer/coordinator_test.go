@@ -36,7 +36,7 @@ func TestCoordinatorLifecycleAndSnapshot(t *testing.T) {
 		t.Fatal("published after cancellation won")
 	}
 	end, ok := c.Advance(start.TransferID, Cancelled)
-	if !ok || end.Revision != 4 {
+	if !ok || end.Revision != 4 || end.Error != nil {
 		t.Fatalf("unexpected terminal state: %#v, %t", end, ok)
 	}
 	if _, err := c.Begin(); !errors.Is(err, ErrBusy) {
@@ -55,6 +55,32 @@ func TestCoordinatorLifecycleAndSnapshot(t *testing.T) {
 	}
 	if _, ok := c.Snapshot(start.TransferID); ok {
 		t.Fatal("old terminal snapshot retained after new session")
+	}
+}
+
+func TestCoordinatorFailureSnapshotCopiesErrorThroughRelease(t *testing.T) {
+	var c Coordinator
+	started, err := c.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed, ok := c.Fail(started.TransferID, ErrOfferTimeout)
+	if !ok || failed.State != Failed || failed.Error == nil || failed.Error.Code != "OFFER_TIMEOUT" {
+		t.Fatalf("failed snapshot lost error: %+v, %t", failed, ok)
+	}
+	failed.Error.Message = "mutated outside coordinator"
+
+	if !c.Release(started.TransferID) {
+		t.Fatal("failed session did not release")
+	}
+	recent, ok := c.Snapshot(started.TransferID)
+	if !ok || recent.Error == nil || recent.Error.Code != "OFFER_TIMEOUT" || recent.Error.Message == "mutated outside coordinator" {
+		t.Fatalf("released snapshot did not retain detached error: %+v, %t", recent, ok)
+	}
+	recent.Error.Code = "MUTATED"
+	reloaded, ok := c.Snapshot(started.TransferID)
+	if !ok || reloaded.Error == nil || reloaded.Error.Code != "OFFER_TIMEOUT" {
+		t.Fatalf("snapshot read exposed coordinator error: %+v, %t", reloaded, ok)
 	}
 }
 
