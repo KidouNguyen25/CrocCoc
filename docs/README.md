@@ -1,30 +1,28 @@
 # Bộ hồ sơ kỹ thuật CrocCoc
 
-| Mã bộ hồ sơ | Phiên bản | Ngày | Mã nguồn đối chiếu | Trạng thái |
-| --- | --- | --- | --- | --- |
-| CC-DOC-001 | 0.2 | 2026-11-19 | `610b622` | Dự thảo để đội dự án duyệt |
+**CC-DOC-001 · 0.6 · 2026-11-23 · Đang cập nhật theo tích hợp Windows.** Nguồn init `610b622`; bộ hồ sơ này đã đồng bộ với nhánh tích hợp Windows (`backend/transfer/`, `app.go` 8 binding khớp ICD, `main.go` có `SingleInstanceLock` và `OnBeforeClose`/`OnShutdown`). Xem kết quả chạy thực tế mới nhất tại [verification.md](verification.md).
 
-CrocCoc là ứng dụng desktop. Frontend và backend tách thành phần và kiểm thử, tích hợp qua Wails IPC. Bản init hiện có mock gửi/nhận, adapter và backend stub, chưa truyền thật.
+| Hồ sơ | Nội dung | Khung tham chiếu |
+| --- | --- | --- |
+| [Yêu cầu](requirements.md) | Phạm vi, MVP và yêu cầu có mã | 29148 |
+| [Hợp đồng](transfer-contract.md) | Init so với IPC mục tiêu | 29148, 15289 |
+| [Kiến trúc](architecture.md) | Engine, staging, publish, hủy và ADR | 42010 |
+| [Mô hình đe dọa](threat-model.md) | Ranh giới, relay, kênh mã và rủi ro | 42010 |
+| [Xác minh](verification.md) | Ca và bằng chứng đã chạy | 29119-3 |
+| [Truy vết](traceability.md) | Yêu cầu → điểm thực hiện → ca | 29148, 29119-3 |
+| [Cấu hình](configuration-management.md) | Baseline, pin, cập nhật và version | 15289 |
+| [Phát hành](release.md) | Build, đóng gói, kiểm, bàn giao | 15289 |
 
-## Danh mục
+Các chuẩn là hướng tổ chức hồ sơ, không phải tuyên bố chứng nhận hay đối chiếu toàn bộ điều khoản. Mốc 25/12/2026 là lịch sử. [Notion](https://kidounguyen.notion.site/CrocCoc-41cf424aba708182998fe301aaed3636) là tham khảo, chưa được đối chiếu về ticket hoặc cam kết.
 
-| Mã | Tài liệu | Nội dung | Tham chiếu chính |
-| --- | --- | --- | --- |
-| CC-SRS-001 | [Đặc tả yêu cầu phần mềm](requirements.md) | Vai trò, phạm vi, yêu cầu, tiêu chí chấp nhận và quyết định mở | ISO/IEC/IEEE 29148:2018 |
-| CC-ICD-001 | [Đặc tả API và điều khiển giao diện](transfer-contract.md) | Lời gọi Wails, kiểu dữ liệu, lỗi, sự kiện, vòng đời và tương thích | ISO/IEC/IEEE 29148:2018 và 15289:2019 |
-| CC-AD-001 | [Mô tả kiến trúc](architecture.md) | Bên liên quan, góc nhìn, thành phần, giao tiếp, triển khai và ADR | ISO/IEC/IEEE 42010:2022 |
-| CC-VV-001 | [Kế hoạch và đặc tả kiểm thử](verification.md) | Môi trường, dữ liệu, thủ tục, tiêu chí đạt, trạng thái và hồ sơ kiểm thử init | ISO/IEC/IEEE 29119-3:2021 |
-| CC-RTM-001 | [Ma trận truy vết](traceability.md) | Yêu cầu → thành phần → API → ca nghiệm thu | ISO/IEC/IEEE 29148:2018 và 29119-3:2021 |
-| CC-CM-001 | [Quản lý cấu hình và thay đổi](configuration-management.md) | Hạng mục, baseline, kiểm soát thay đổi và hồ sơ trạng thái | ISO/IEC/IEEE 15289:2019 |
-| CC-REL-001 | [Thủ tục build và phát hành Windows](release.md) | Điều kiện, build, kiểm chứng, bàn giao và quay lui | ISO/IEC/IEEE 15289:2019 |
+## Lịch sử hồ sơ
 
-Bắt đầu từ SRS để nắm phạm vi. Khi sửa frontend hoặc backend, đọc ICD và kiến trúc. Dùng RTM để chọn ca trong V&V. Dùng thủ tục phát hành khi chuẩn bị bàn giao, không dùng ZIP mockup như bản cài.
+| Revision | Bằng chứng / hồ sơ thay đổi |
+| --- | --- |
+| 0.2 | `e7e46ad`, bộ hồ sơ IEEE ban đầu, không đổi mã init. |
+| 0.3 | Chưa tìm thấy bản hoặc SHA có thể xác minh. Không suy diễn nội dung. |
+| 0.4 | Bản nháp quan sát trong working tree. Bổ sung wire mục tiêu, revision, lifecycle và yêu cầu pin Croc. Chưa xác nhận commit riêng. |
+| 0.5 | Yêu cầu và RTM tách tiêu chí. ICD thêm đề nghị nhận, trạng thái hủy và mã lỗi, bỏ trường tiến độ trùng. AD chốt an toàn staging, so sánh engine và cổng spike. Thêm TM. Cập nhật V&V, CMP và thủ tục phát hành để tách các mức nghiệm thu. |
+| 0.6 | Đồng bộ hồ sơ với tích hợp Windows (8 Wails binding theo ICD, wire byte dạng chuỗi thập phân không gửi `progress`/`bytesPerSecond`, bỏ `Idle` khỏi Go wire, `SingleInstanceLock`, Job Object kill-on-close, `CopySendCode` dùng message-only HWND, cập nhật bằng chứng kiểm thử Windows Go 1.27.4 và Frontend). |
 
-## Phạm vi áp dụng tiêu chuẩn
-
-- [ISO/IEC/IEEE 29148:2018](https://www.iso.org/standard/72089.html) định hướng hồ sơ yêu cầu, điều kiện xác minh và truy vết.
-- [ISO/IEC/IEEE 42010:2022](https://www.iso.org/standard/74393.html) định hướng mô tả kiến trúc theo bên liên quan, mối quan tâm và các góc nhìn.
-- [ISO/IEC/IEEE 29119-3:2021](https://www.iso.org/standard/79429.html) định hướng cấu trúc kế hoạch, ca kiểm thử và báo cáo kết quả.
-- [ISO/IEC/IEEE 15289:2019](https://www.iso.org/standard/74909.html) định hướng lựa chọn, phân loại và duy trì các hồ sơ vòng đời.
-
-Bộ hồ sơ vận dụng các chuẩn theo phạm vi dự án. Đây không phải đánh giá đối chiếu từng điều khoản hay tuyên bố chứng nhận. `0.2` là phiên bản tài liệu, độc lập với phiên bản ứng dụng. Mã nguồn đối chiếu là baseline kỹ thuật, không chứng minh mọi mục tiêu đã triển khai. Để quản lý revision hoặc xác nhận baseline mới, dùng [quy trình cấu hình](configuration-management.md).
+Phiên bản chi tiết tại đầu từng file. Dùng Git để xem lịch sử từng file và bảng này để xác định baseline. Chỉ chỉnh tài liệu sở hữu thông tin bị thay đổi, rồi rà liên kết truy vết liên quan.

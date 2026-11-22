@@ -1,65 +1,51 @@
-# API / ICD — Đặc tả giao diện truyền tệp CrocCoc
+# ICD — Hợp đồng truyền tệp
 
-| Mã | Phiên bản | Ngày | Trạng thái | Mã nguồn đối chiếu |
-| --- | --- | --- | --- | --- |
-| CC-ICD-001 | 0.2 | 2026-11-19 | Dự thảo CC-01 | `610b622` |
+**CC-ICD-001 · 0.6 · 2026-11-23 · Đang triển khai trên Windows.**
 
-## 1. Ranh giới và phạm vi
+Đây là Wails IPC giữa [bridge Go](../app.go) và [adapter TS](../frontend/src/adapters/wailsTransfer.ts), không phải API HTTP. Host hiện triển khai 8 binding: `GetCrocInfo` (CC-API-01), `StartSend` (CC-API-02), `StartReceive` (CC-API-03), `CancelTransfer` (CC-API-04), `GetTransferSnapshot` (CC-API-06, trả `*Update` / `null`), `SelectPaths` (CC-API-07), `CopySendCode` (CC-API-08), `DecideReceive` (CC-API-10), cùng sự kiện `transfer:update` (CC-API-05). `OpenReceiveDirectory` (CC-API-09) chưa triển khai. Go wire (`backend/transfer/contract.go`) đã bỏ `Idle`, bỏ `progress`/`bytesPerSecond`, bỏ `CrocInfo.Path`, và gửi cặp `bytesTransferred`/`bytesTotal` dạng chuỗi thập phân; UI giữ `IDLE` cục bộ và tự tính phần trăm bằng số nguyên chính xác (`BigInt`). Lỗi trước chấp nhận hiện đi qua chuỗi Go chuẩn hóa `"CODE: message"` (chưa bật Wails `ErrorFormatter` thành object).
 
-Đây là **API nội bộ Wails IPC và sự kiện**, không phải REST API. Không có URL gốc, endpoint HTTP, mã trạng thái HTTP hay cơ chế đăng nhập cho API này. WebView gọi binding `window.go.main.App` qua [adapter TypeScript](../frontend/src/adapters/wailsTransfer.ts). [Bridge Go](../app.go) chuyển lời gọi đến [`transfer.Service`](../backend/transfer/service.go). Hợp đồng dữ liệu được mô tả bằng [kiểu Go](../backend/transfer/contract.go) và [kiểu TypeScript](../frontend/src/transfer.ts). [Wails Events](https://wails.io/docs/v2.15.0/reference/runtime/events/) là tài liệu cơ chế sự kiện họ Wails v2, không thay phiên bản phụ thuộc trong repo.
+## Lời gọi và sự kiện mục tiêu
 
-**Bản init.** Desktop chỉ dùng `GetCrocInfo` cho nhãn khả dụng. Ba lệnh còn lại đã có binding nhưng dịch vụ trả `ErrNotIntegrated` và không phát sự kiện phiên thật. [Client mock](../frontend/src/mockTransfer.ts) mô phỏng cùng kiểu dữ liệu nhưng không gọi Croc, không đọc hoặc ghi tệp. Các quy tắc ghi **Mục tiêu** chưa phải cam kết về hành vi đang chạy.
+| ID | Binding / sự kiện | Hành vi |
+| --- | --- | --- |
+| CC-API-01 | `GetCrocInfo()` | Trả khả dụng và phiên bản đã xác minh. Trả `{available, version?, error?}`. Nếu unavailable phải có `error` theo dạng bên dưới, không lộ đường dẫn máy. |
+| CC-API-02 | `StartSend(paths)` | Chấp nhận danh sách hợp lệ, cấp ID nếu mở được phiên. Không ghép đường dẫn vào chuỗi shell. |
+| CC-API-03 | `StartReceive(code, outputDir)` | Kiểm mã/đích cục bộ rồi cấp ID. Chỉ bắt đầu kết nối để nhận metadata, chưa cho tải nội dung. Sau khi nhận lời gọi, UI bỏ mã khỏi ô nhập. |
+| CC-API-04 | `CancelTransfer(transferID)` | `true` khi thắng mốc khóa và phiên đi vào `CANCELLING`. `false` nếu sai ID, đã yêu cầu hủy, đang công bố hoặc đã kết thúc. |
+| CC-API-05 | `transfer:update` | Một event chứa đúng một snapshot đầy đủ. Adapter trả hàm tháo listener. |
+| CC-API-06 | `GetTransferSnapshot(transferID)` | Snapshot của phiên hoạt động hoặc terminal gần nhất trong RAM, hoặc `null`. Không lưu lịch sử. Khi chấp nhận phiên mới, không bảo đảm còn terminal cũ. |
+| CC-API-07 | `SelectPaths(kind)` | `sendFiles`, `sendDirectory`, `receiveDirectory`. Hủy picker trả mảng rỗng, loại thư mục trả tối đa một đường dẫn. |
+| CC-API-08 | `CopySendCode(transferID)` | Tùy khả năng. Chỉ host chép đúng mã đang hiển thị cho phiên gửi còn chờ ở thời điểm ghi. Không nhận chuỗi tùy ý hay ghi lặp ngoài thao tác người dùng. Đây là ràng buộc tính toàn vẹn, không phải bảo mật mã khỏi WebView. Nếu cờ Win32 chưa xác minh được, trả lỗi `COPY_UNSAFE` và không ghi mã. |
+| CC-API-09 | `OpenReceiveDirectory(transferID)` | Tùy khả năng. Chỉ mở đích vừa xác minh lại của phiên nhận thành công gần nhất. ID sai trả `false`, lỗi Explorer trả lỗi riêng. |
+| CC-API-10 | `DecideReceive(transferID, offerID, accept)` | So khớp đề nghị bất biến còn hạn. `true` nếu quyết định được nhận, `false` nếu sai ID, đã quyết định, hết hạn hoặc không còn ở pha đợi. Không nhận tên hoặc đường dẫn từ UI. Khi `accept=true`, backend chạy lại preflight trước khi cho tải. Từ chối đi qua `CANCELLING` rồi `CANCELLED` nếu dọn xong. |
 
-## 2. Lời gọi
+Kết quả `Start*` xác nhận chấp nhận phiên, không xác nhận truyền thành công. Lỗi trước chấp nhận trả reject có dạng mục tiêu `{code, message}`, không phát ID hoặc event. Host dùng [ErrorFormatter của Wails](https://v2.wails.io/docs/reference/options/) hoặc adapter typed result nếu kiểm thử native cho thấy Wails không giữ hình dạng. Khóa đúng một wire trước khi tích hợp. Các lỗi sau chấp nhận đi qua `FAILED` và trường `error`. UI phân nhánh theo mã, không dựa vào dấu câu hoặc câu tiếng Việt.
 
-| Mã | Binding Wails → phương thức UI | Đầu vào | Kết quả bản init | Mục tiêu |
-| --- | --- | --- | --- | --- |
-| CC-API-01 | `GetCrocInfo()` → `getCrocInfo()` | Không có | Promise resolve `{ available: false, message: … }`. Không có `version` hoặc `path` từ stub. | Trả `CrocInfo`. Thiếu hoặc không dùng được binary báo `available: false`, kèm thông báo an toàn nếu cần. Không đồng nghĩa peer đã kết nối. |
-| CC-API-02 | `StartSend(paths)` → `startSend(paths)` | `paths: string[]` là các đường dẫn nguồn cục bộ, ít nhất một giá trị không rỗng | Promise reject từ `ErrNotIntegrated`. Không có ID hoặc event. | Kiểm tra nguồn trước khi mở phiên. Promise resolve ID không rỗng nếu chấp nhận, reject nếu đầu vào sai, đang bận hoặc không khởi tạo được. |
-| CC-API-03 | `StartReceive(code, outputDir)` → `startReceive(code, outputDir)` | `code: string` là mã kết nối, `outputDir: string` là thư mục đích cục bộ có quyền ghi | Promise reject từ `ErrNotIntegrated`. Lỗi stub không nhắc lại mã nhập. | Kiểm tra dữ liệu và đích trước khi mở phiên. Resolve ID nếu chấp nhận, reject nếu không khởi tạo được. Nếu mã không kết nối được sau khi có ID, báo lỗi bằng event của phiên. |
-| CC-API-04 | `CancelTransfer(transferID)` → `cancelTransfer(transferID)` | `transferID: string` lấy từ kết quả bắt đầu | Go trả `false, ErrNotIntegrated`. Phía Wails nhận lỗi qua Promise reject, không phải resolve `false` thành công. | `true` nghĩa là đã chấp nhận yêu cầu hủy. `false` nếu sai ID hoặc phiên không còn hoạt động. `CANCELLED` mới là kết quả cuối của việc hủy. Lỗi vận hành reject. |
-| CC-API-05 | `runtime.EventsOn("transfer:update", handler)` → `subscribe(handler)` | Handler nhận một `TransferUpdate` | Adapter đăng ký event và trả hàm hủy đăng ký. Backend stub không phát event. | Một đối tượng cập nhật cho mỗi event. UI gỡ listener khi không còn dùng. |
+| Nhóm | `ErrorCode` tối thiểu |
+| --- | --- |
+| Điều kiện bắt đầu | `NOT_INTEGRATED`, `BUSY`, `INVALID_INPUT`, `ENGINE_UNAVAILABLE`, `UNSUPPORTED_DESTINATION`, `SOURCE_UNAVAILABLE` |
+| Nhận và thời hạn | `UNSAFE_OFFER`, `DESTINATION_CONFLICT`, `RESOURCE_LIMIT`, `PEER_TIMEOUT`, `OFFER_TIMEOUT` |
+| Vận hành | `SOURCE_CHANGED`, `TRANSFER_FAILED`, `PUBLISH_FAILED`, `CLEANUP_FAILED`, `COPY_UNSAFE`, `OS_ACTION_FAILED` |
 
-Đường dẫn có khoảng trắng và Unicode được chuyển thành giá trị riêng, không nối vào chuỗi lệnh. Quy tắc chuẩn hóa đường dẫn, ghi đè và xử lý mã sai chi tiết phải chốt trước tích hợp. Kết quả `Start*` chỉ là xác nhận tạo phiên, không phải xác nhận đã truyền thành công.
+## Snapshot và vòng đời
 
-## 3. Từ điển dữ liệu
+Bắt buộc có `transferID` opaque, `revision` số nguyên an toàn JS tăng từ 1 trong mỗi phiên, và `state`. Trường tùy chọn không gửi `null`. Thiếu trường nghĩa là không còn giá trị, không dùng lại từ snapshot trước.
 
-| Đối tượng / trường | Kiểu | Bắt buộc | Ý nghĩa |
-| --- | --- | --- | --- |
-| `CrocInfo.available` | boolean | Có | Croc dùng được theo điều kiện kiểm tra của dịch vụ. |
-| `CrocInfo.version` | string | Không | Phiên bản đã phát hiện, không mặc định bằng pin nếu chưa kiểm tra. |
-| `CrocInfo.path` | string | Không | Đường dẫn binary cục bộ nếu biết. Không đưa đường dẫn thật vào báo cáo công khai. |
-| `CrocInfo.message` | string | Không | Mô tả khả dụng hoặc gợi ý khắc phục. |
-| `TransferUpdate.transferID` | string | Có | ID bất biến trong một phiên. Client xử lý như chuỗi opaque, không dựa vào dạng `mock-*`. |
-| `TransferUpdate.state` | enum | Có | Một giá trị trong vòng đời bên dưới. |
-| `TransferUpdate.currentFile` | string | Không | Mục đang xử lý khi biết. Có thể chứa thông tin tên tệp. |
-| `TransferUpdate.bytesTransferred`, `bytesTotal` | number, Go `*int64` | Không | Byte không âm khi có số đo. Không mặc định 0 cho giá trị chưa biết. |
-| `TransferUpdate.bytesPerSecond` | number, Go `*int64` | Không | Byte mỗi giây khi có số đo phù hợp. |
-| `TransferUpdate.progress` | number, Go `*float64` | Không | Phần trăm 0–100 khi đáng tin cậy. |
-| `TransferUpdate.message` | string | Không | Thông báo đã lọc dữ liệu nhạy cảm, không kèm output thô. |
-| `TransferUpdate.connectionCode` | string | Không | Chỉ chuyển mã sang UI người gửi khi cần hiển thị hoặc sao chép. |
+- `receiveOffer` chỉ có khi `AWAITING_ACCEPTANCE`. Gồm `offerID`, danh sách tên tương đối đã kiểm kèm loại mục và số byte của tệp, `fileCount`, `totalBytes` và thời điểm hết hạn. Không chứa đường dẫn máy gửi. Revision không thay cho `offerID`.
+- `connectionCode` chỉ có ở snapshot gửi còn `WAITING_FOR_PEER`, qua CC-API-05/06 có chủ đích. Không trả trong trạng thái khác, reject, snapshot chẩn đoán hay API clipboard. Đọc [ngoại lệ bảo mật](threat-model.md).
+- `bytesTransferred`, `bytesTotal` là cặp tùy chọn cùng phạm vi đo của phiên, dạng chuỗi thập phân chuẩn không âm, tối đa `9223372036854775807`, với số đã truyền không vượt tổng. Có thể bỏ cả cặp. Không gửi `progress` hoặc `bytesPerSecond` trên wire mục tiêu. UI tính phần trăm từ cặp bằng số nguyên chính xác trước khi đổi sang số hiển thị. Tổng bằng 0 hoặc thiếu số đo thì tiến độ không xác định. `100%` không có nghĩa đã publish xong.
+- `error` có `code` và `message` đã lọc, chỉ có ở `FAILED`. `partialOutput: true` nếu công bố đã thay đổi đích và rollback không xác minh là sạch. `cleanupPending: true` nếu còn tài nguyên chưa giải phóng. Cả hai không chứa đường dẫn hoặc output thô.
 
-Tên trường phân biệt hoa thường. Theo struct Go, trường chuỗi tùy chọn rỗng hoặc con trỏ nil được bỏ qua. Con trỏ có giá trị 0 được serialize thành 0. Với các trường số lớn hơn giới hạn số nguyên chính xác của JavaScript, cách biểu diễn chưa chốt. Không đổi kiểu wire khi chưa phối hợp FE và BE.
+| Trạng thái | Chuyển tiếp hợp lệ |
+| --- | --- |
+| `PREPARING` | `WAITING_FOR_PEER`, `CANCELLING`, `FAILED` |
+| `WAITING_FOR_PEER` | `AWAITING_ACCEPTANCE` (nhận), `TRANSFERRING` (gửi sau khi peer đồng ý), `CANCELLING`, `FAILED` |
+| `AWAITING_ACCEPTANCE` | `TRANSFERRING`, `CANCELLING`, `FAILED` |
+| `TRANSFERRING` | `FINALIZING`, `CANCELLING`, `FAILED` |
+| `FINALIZING` | `COMPLETED`, `FAILED` |
+| `CANCELLING` | `CANCELLED`, `FAILED` |
+| `COMPLETED`, `FAILED`, `CANCELLED` | Terminal, không phát thêm snapshot cho ID này. |
 
-Ví dụ cập nhật mục tiêu, không chứa mã kết nối:
+Backend ghi `CANCELLING` và bỏ mã trước khi đợi engine dừng. `FINALIZING` là mốc khóa, đứng trước publish đầu tiên hoặc chốt thành công gửi. Timeout dùng cùng quy trình dừng nhưng kết thúc `FAILED` với lý do timeout nếu dọn thành công. Dọn không xác nhận được trong hạn thì `FAILED / CLEANUP_FAILED`, chặn phiên mới cho tới khi tài nguyên đã nhả. Không có terminal thứ hai.
 
-```json
-{"transferID":"example-id","state":"WAITING_FOR_PEER"}
-```
-
-```json
-{"transferID":"example-id","state":"TRANSFERRING","progress":0}
-```
-
-## 4. Vòng đời, đồng thời và lỗi
-
-- `IDLE` là trạng thái UI chưa có phiên. Luồng thường là `PREPARING` → `WAITING_FOR_PEER` → `TRANSFERRING` → `COMPLETED`. Phiên đang chạy có thể kết thúc bằng `FAILED` hoặc `CANCELLED`. Cập nhật tiến độ có thể lặp trong cùng trạng thái.
-- **Mục tiêu.** Tối đa một phiên hoạt động toàn ứng dụng. Một phiên đã chấp nhận phải có đúng một trạng thái kết thúc. Không phát cập nhật sau trạng thái đó. UI đăng ký event trước khi gọi `Start*` và ghép đúng `transferID`. Trường hợp event đầu đến trước lúc Promise resolve phải được thiết kế và kiểm thử ở CC-01/03. Bản init chưa xác nhận thứ tự qua Wails thật.
-- Lỗi trước khi chấp nhận phiên đi qua Promise reject. Lỗi sau khi chấp nhận đi qua `FAILED`. Thông báo dùng cho người đọc, không parse theo câu chữ. Chưa có enum lỗi ổn định trên wire.
-- Mã nhận không được xuất hiện trong event phục vụ người nhận, log hoặc thông báo lỗi. Mã người gửi chỉ dùng trong phiên. Không ghi lâu dài. Việc hủy phải dừng tiến trình con và giải phóng tài nguyên trước khi công bố `CANCELLED`.
-
-## 5. Tương thích và kiểm thử
-
-Tên binding, đối số theo thứ tự, tên event, trường bắt buộc và giá trị enum là ranh giới tương thích. Trường tùy chọn mới phải cập nhật cả hai kiểu dữ liệu và test deserialize. Thay tên, kiểu, giá trị hoặc thứ tự cần xác nhận trước của hai phía, cập nhật ICD và hồi quy adapter, bridge, serialization. Không thêm URL hay Swagger cho một giao diện không dùng HTTP.
-
-Điểm kiểm thử nằm ở [ca CC-T-01/02/13/14](verification.md) và [ma trận truy vết](traceability.md). CC-01 xác nhận hợp đồng, CC-02/03 tích hợp Croc, CC-04–06 hoàn thiện UI và CC-07/08 xác minh bản Windows, theo phân công trong hồ sơ init.
+UI đăng ký listener trước Start, nhận ID rồi đọc snapshot. Chỉ áp dụng ID hiện tại và revision mới hơn, bỏ ID cũ và không lùi khỏi terminal. Khi mở lại listener hoặc thiếu cập nhật, đọc lại snapshot với retry hữu hạn, báo mất theo dõi nếu không phục hồi. Adapter bỏ payload sai ID, revision hoặc state. Cặp byte sai bị bỏ, không làm mất terminal hợp lệ. Xem [các ca native](verification.md).

@@ -1,77 +1,60 @@
-# AD — Mô tả kiến trúc CrocCoc
+# AD — Kiến trúc CrocCoc
 
-| Mã | Phiên bản | Ngày | Trạng thái | Mã nguồn đối chiếu |
-| --- | --- | --- | --- | --- |
-| CC-AD-001 | 0.2 | 2026-11-19 | Dự thảo để duyệt | `610b622` |
+**CC-AD-001 · 0.5 · 2026-11-19 · Dự thảo.** Tham chiếu [ISO/IEC/IEEE 42010:2022](https://www.iso.org/standard/74393.html). Phân biệt [wire init và wire mục tiêu](transfer-contract.md).
 
-Cấu trúc tài liệu tham chiếu [ISO/IEC/IEEE 42010:2022](https://www.iso.org/standard/74393.html). Đối tượng mô tả là ứng dụng desktop CrocCoc. Người dùng chạy một gói desktop, còn frontend và backend tách mã nguồn, trách nhiệm và kiểm thử. Croc CLI, WebView2 và mạng là các phụ thuộc ngoài.
+| Thành phần | Sở hữu |
+| --- | --- |
+| FE / FE-IPC | React hiển thị, xác nhận và đồng bộ snapshot. Adapter kiểm payload Wails. Mock không có quyền truyền thật. |
+| HOST | Bridge và UI native Windows, clipboard, Explorer, vòng đời WebView, `SingleInstanceLock` với UUID cố định. Lần mở sau chỉ đưa cửa sổ đầu lên, không tiếp nhận tham số truyền. |
+| BE | Một coordinator sở hữu state, revision, deadline, preflight, publish và quyết định hủy. Không phụ thuộc Wails. |
+| ENGINE | Dùng giao thức Croc. Phải có metadata đầy đủ trước payload, cổng đồng ý và tín hiệu kết quả có cấu trúc. Không được ghi đích cuối hoặc phát snapshot UI trực tiếp. |
+| WIN-FS | Kiểm identity/volume, staging, kiểm đường dẫn theo handle, publish no-replace và phục hồi vùng tạm do app sở hữu. |
 
-## 1. Bên liên quan, mối quan tâm và góc nhìn
+## ADR-03 — Chọn engine sau spike
 
-| Góc nhìn | Bên liên quan | Câu hỏi cần trả lời | Mô hình dùng trong tài liệu |
-| --- | --- | --- | --- |
-| VP-01 Cấu trúc | Frontend, backend, reviewer | Lớp nào sở hữu logic và lớp nào chuyển lời gọi? | Bảng thành phần và hướng phụ thuộc. |
-| VP-02 Vận hành | Người gửi, người nhận, backend, QA | Một phiên đi qua các lớp nào, ai xử lý lỗi và hủy? | Luồng theo chế độ, quy tắc trạng thái từ ICD. |
-| VP-03 Triển khai | Tích hợp, QA, người dùng desktop | Gói nào chạy trên Windows, cần gì và có gọi mạng không? | Bảng node triển khai và ranh giới tin cậy. |
+Mốc spike nội bộ `SPIKE-ENGINE` tương ứng với CC-02 trong ghi chú lịch sử. Đã đọc mã [Croc v11.6.4](https://github.com/schollz/croc/tree/v11.6.4), không coi kết quả đọc là chạy thử Windows. Module là `github.com/schollz/croc/v11`, giấy phép MIT, `go.mod` yêu cầu Go 1.27.3 cho bản pin này. Package `src/croc` xuất `NewCtx`, `Send` và `Receive`. Điểm vào nhận metadata `processSenderInfo` là nội bộ và prompt đọc stdin. Import trực tiếp không tự cung cấp hook manifest/consent hoặc cô lập I/O.
 
-## 2. VP-01 — Cấu trúc và sở hữu
+| Phương án | Đánh giá |
+| --- | --- |
+| Croc CLI nguyên bản | Dễ đóng gói, cách ly tiến trình. Có `CROC_SECRET`, `--disable-clipboard` và `--no-update-check`. Nhưng prompt nhận chỉ tóm tắt, không có manifest máy đọc trước payload. Không đủ cho nhận MVP nếu chỉ parse prompt. |
+| Nhúng thư viện Go trong host | Bỏ kênh secret qua argv/env. `NewCtx` hữu ích cho hủy. Phải chứng minh toolchain, hook nhận, I/O không qua biến toàn tiến trình, biên ghi và khả năng dừng. Không đổi CWD/stdin/stdout toàn host để giả lập API thư viện. |
+| Helper Go riêng bọc một nhánh Croc tối thiểu | Ưu tiên làm spike nếu thư viện nguyên bản thiếu hook. Framing typed qua pipe riêng để cấp secret, manifest, quyết định và kết quả. Cách ly CWD/I/O, giữ được giao thức Croc và giới hạn thời gian dừng cả cây tiến trình. Chi phí là duy trì patch, nguồn, giấy phép và kiểm hồi quy mỗi lần bump. |
+| Giao thức riêng | Ngoài MVP. Không dùng để lách cổng an toàn. |
 
-| ID | Thành phần | Trách nhiệm và phụ thuộc |
-| --- | --- | --- |
-| FE | [React UI](../frontend/src/App.tsx) | Hiển thị chế độ, trạng thái và thao tác. Dùng `TransferClient` làm biên gọi, không điều phối tiến trình Croc. |
-| FE-MOCK | [Mock TypeScript](../frontend/src/mockTransfer.ts) | Lịch event có thể hủy, mã mẫu, không đọc hoặc ghi tệp. Dùng cho trình duyệt và nút mô phỏng trong desktop init. |
-| FE-IPC | [Adapter Wails](../frontend/src/adapters/wailsTransfer.ts) | Ánh xạ lời gọi và event sang `TransferClient`. Không quyết định quy tắc hủy hay chuẩn hóa dữ liệu nghiệp vụ. |
-| HOST | [Wails host](../main.go) và [bridge](../app.go) | Nhúng bundle frontend, bind `main.App` và chuyển lời gọi vào `transfer.Service`. Không sở hữu tiến trình truyền. |
-| BE | [Backend Go](../backend/transfer/) | Sở hữu kiểu dữ liệu và hành vi truyền. Không import Wails. Hiện bind một dịch vụ báo chưa tích hợp. |
-| CLI | Croc CLI | Phụ thuộc ngoài do backend mục tiêu khởi chạy và theo dõi. Bản init không chạy binary này. |
+Nếu thử CLI, đọc stdout/stderr đồng thời, tách frame theo LF/CR, loại ANSI, giữ kích thước mỗi frame và tổng bộ đệm hữu hạn. Không coi dòng stderr là API ổn định. Không nhặt secret từ URL/lệnh in ra nếu không có fixture pin chứng minh chính xác. Không gửi Enter hoặc `--yes` để bỏ qua chấp nhận. Gặp prompt/định dạng không hỗ trợ thì dừng an toàn. Không suy state, phần trăm hoặc thành công từ progress bar, exit status không thay xác minh dữ liệu. Không lưu output thô. Unmodified CLI có thể hữu ích cho kiểm tương tác, nhưng không được bật nhận thật nếu không có manifest có cấu trúc và chặn payload.
 
-Hướng phụ thuộc khi tích hợp là frontend → adapter → Wails bridge → backend. Điều khiển trạng thái phải thuộc backend. Wails chuyển tiếp event, còn UI trình bày trạng thái. Frontend có thể thay implementation `TransferClient` bằng mock mà không cần Go.
+**Cổng spike:** Windows x64, hai đầu, fixture biết trước. Chứng minh phiên bản và tuyến relay, kênh mã không argv, không tự chép/nhớ cấu hình, manifest cấu trúc trước khi yêu cầu payload, chấp nhận/từ chối, ranh giới ghi, thời hạn và cây tiến trình nếu có. Nếu helper cũng không đạt, giữ `NOT_INTEGRATED`, chỉ demo mock và mở lại ADR. Không thu gọn consent hoặc no-replace để kịp lịch.
 
-## 3. VP-02 — Luồng chạy và trạng thái
+## Luồng nhận Windows
 
-| Chế độ | Đường đi | Kết quả xác định |
-| --- | --- | --- |
-| Trình duyệt init | FE → FE-MOCK → FE | Gửi, nhận và hủy bằng lịch mẫu. Không dùng mạng để truyền tệp. |
-| Desktop init, kiểm tra Croc | FE → FE-IPC → HOST → BE | Hiển thị trạng thái chưa tích hợp. Bấm nút mô phỏng vẫn dùng FE-MOCK. |
-| Desktop mục tiêu | FE → FE-IPC → HOST → BE → CLI | Backend kiểm tra đầu vào và khả dụng, nhận hoặc từ chối phiên, theo dõi Croc. Event đi ngược qua HOST và FE-IPC. |
+1. Giữ identity thư mục đích trên ổ NTFS cục bộ cố định, kể cả D:. Không dùng `%TEMP%` để chứa payload. Từ chối UNC/ổ mạng, reparse point trên chuỗi tổ tiên và thư mục không chứng minh được quyền ghi hoặc khả năng publish. Thiết lập quyền vùng tạm giới hạn người dùng chạy app.
+2. Nhận manifest bất biến, chưa yêu cầu hoặc ghi payload. Chuẩn hóa tương đối và kiểm từng component theo Windows. Chặn đường tuyệt đối, drive/UNC, `.`, `..`, tên thiết bị Windows (CON, PRN, AUX, NUL, COM1–9, LPT1–9 và biến thể được Windows coi là thiết bị), kể cả có phần mở rộng, dấu chấm/khoảng trắng cuối, dấu hai chấm/ADS, ký tự cấm và điều khiển bidi. Phát hiện alias không phân biệt hoa thường theo đích, alias 8.3 và xung đột tệp/thư mục. MVP từ chối đường dẫn đạt 260 đơn vị UTF-16 tính cả NUL theo chính sách bảo thủ, kiểm cả staging và đích.
+3. Preflight root-level trước khi hiển thị đề nghị. Mỗi **mục** là một tệp hoặc thư mục cấp cao nhất được mô tả trong manifest. Không gộp vào thư mục đã có. Từ chối manifest có hơn 10.000 entry (kể cả thư mục), tệp khai vượt mức hoặc tổng payload vượt 20 GiB. Dùng phép cộng có kiểm tràn. Kiểm dung lượng trống theo quota người dùng tối thiểu bằng tổng payload cộng 256 MiB và áp ngân sách khi nhận. Giá trị là giới hạn MVP đề xuất, không phải số đo.
+4. Hiện đề nghị đã kiểm, tên không dùng để thao tác trực tiếp từ UI. Chỉ tải sau xác nhận đúng `offerID` và chạy lại preflight. Nếu trùng cho người dùng đổi đích và mở phiên mới, thay vì đổi tên tự động. MVP giữ nguyên tên và cấu trúc đã được xác nhận. Nếu sau này có đổi tên, phải hiện trước và được đồng ý. Nhận từ chối/timeout không ghi payload.
+5. Tạo staging độc quyền trực tiếp trong đích với tên ngẫu nhiên `.croccoc-stage-<uuid>`, thư mục payload riêng và marker phiên không chứa secret. Ghi sổ sở hữu riêng tại AppData gồm UUID, volume ID, identity đích/staging, marker nonce và trạng thái. Chỉ cấp phép ghi sau khi lưu được record bền. Dùng handle/check identity để khóa đường dẫn dưới root, tạo mục an toàn, từ chối link, reparse point, alias và metadata không khai báo **trước từng thao tác ghi**. CWD không phải sandbox. Hạn chế payload vào nội dung đã duyệt, dừng khi số byte vượt khai báo/ngân sách hoặc hết đĩa.
+6. Khi engine báo xong, kiểm toàn bộ cây staging, tập mục, kích thước và kiểm tra toàn vẹn giao thức. Khóa `FINALIZING` trước thay đổi đích đầu tiên. Publish từng root item bằng rename no-replace cùng volume, ứng viên là [FileRenameInfo qua handle](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-setfileinformationbyhandle) với `ReplaceIfExists=FALSE`. Spike phải chứng minh cơ chế neo đích và kiểm identity tại thao tác rename, không dùng riêng việc kiểm path trước đó làm bằng chứng chống đổi tổ tiên. Không copy/delete hoặc fallback cross-volume, không thực hiện check-exists rồi ghi đè. Đích D: hợp lệ nếu staging và các mục thực sự cùng volume D:.
+7. Nếu trùng muộn hoặc lỗi giữa chừng, chỉ rollback mục đã công bố khi còn chứng minh được identity và không bị sửa/thay thế, kể cả cây thư mục. Không đụng dữ liệu có sẵn. Nếu không chứng minh được, giữ mục lại, báo có kết quả một phần và hướng dẫn kiểm tra thủ công. Không coi cả lô là nguyên tử. Không báo thành công nếu công bố thiếu hoặc dọn thất bại.
+8. Khởi động lại không resume. Sau khi giữ khóa instance, chỉ dọn staging có record do app giữ, marker/volume/identity khớp và không có ownership lease/runner đang sống. Không quét xóa theo prefix, không theo reparse point. Nếu không chứng minh được, đích offline, hoặc nội dung bị thay, báo cần xử lý thủ công và thử lại lần sau khi có điều kiện. Không tự rollback mục đã đưa ra đích sau crash. Khoảng trống crash trước record sở hữu có thể để lại thư mục cần dọn thủ công, không cấp quyền tải trước khi ghi xong record.
+
+Ở phía gửi, kiểm tất cả tổ tiên và mục con để từ chối symlink/junction/reparse point. Dùng handle nguồn ổn định, không cho ghi/đổi tên trong khi đọc nếu hệ tệp hỗ trợ. Nếu engine mở lại theo path mà không chứng minh được identity, dùng bản sao đã kiểm trong staging gửi riêng hoặc không nhận nguồn. Kiểm thư mục thay đổi, lỗi khóa và mất quyền, không báo thành công với nội dung chưa xác nhận.
+
+## Deadline và cạnh tranh
+
+Giá trị mục tiêu MVP là 2 phút chuẩn bị, 5 phút chờ peer tính từ lúc engine sẵn sàng, 2 phút duyệt tính từ khi hiện đề nghị, 2 phút không có tiến triển payload, và tối đa 10 giây dừng/dọn chủ động. Chứng minh bằng Windows hoặc điều chỉnh giá trị qua review trước nghiệm thu. Không gia hạn thời gian chờ peer/duyệt vì event hoặc polling.
 
 ```mermaid
-sequenceDiagram
-    participant UI as WebView và adapter
-    participant Host as Wails bridge
-    participant BE as Go service
-    participant CLI as Croc CLI
-    UI->>Host: Bắt đầu phiên
-    Host->>BE: Gọi dịch vụ truyền tệp
-    BE->>CLI: Khởi chạy khi hợp lệ
-    BE-->>Host: ID phiên
-    Host-->>UI: ID phiên
-    CLI-->>BE: Trạng thái chạy
-    BE-->>Host: Cập nhật phiên
-    Host-->>UI: transfer:update
+flowchart TD
+    R["Peer gửi manifest"] --> P["Kiểm tên, quota và đích"]
+    P -->|Không hợp lệ| F["FAILED"]
+    P -->|Hợp lệ| A["AWAITING_ACCEPTANCE"]
+    A -->|Đồng ý và kiểm lại đạt| T["Tải vào staging"]
+    A -->|Từ chối hoặc hủy| C["CANCELLING"]
+    T -->|Hủy thắng| C
+    T -->|Xác minh đạt và khóa| G["FINALIZING"]
+    C -->|Dừng và dọn xong| X["CANCELLED"]
+    C -->|Dọn không xong| F
+    G -->|No-replace và dọn xong| D["COMPLETED"]
+    G -->|Lỗi publish hoặc dọn| F
 ```
 
-Sơ đồ minh họa đường thành công **mục tiêu**. Thứ tự event đầu tiên so với Promise chưa được xác nhận. Quy tắc ID, vòng đời và cửa sổ hủy nằm trong [ICD](transfer-contract.md), không suy ra từ thứ tự minh họa. Khi hủy hoặc thoát, backend mục tiêu chịu trách nhiệm đóng tài nguyên runner. Khi thất bại, không trả lỗi thô của tiến trình lên UI.
-
-## 4. VP-03 — Triển khai và dữ liệu
-
-| Node | Tài nguyên | Ranh giới |
-| --- | --- | --- |
-| Máy phát triển | Node/Vite, Go, Wails CLI | Có thể chạy riêng mô phỏng frontend. Build Windows cần bundle trước khi Go nhúng tài nguyên. |
-| Máy người dùng | EXE Wails x64 và WebView2 | Giao diện và dịch vụ Go nằm trong cùng ứng dụng desktop, không cần dịch vụ HTTP backend riêng. |
-| Tiến trình con mục tiêu | Binary Croc đã khóa | Backend khởi chạy không qua shell. Croc xử lý kết nối tới peer hoặc relay. Chưa có ở init. |
-| Mạng | Peer và relay nếu cần | Ngoài phạm vi điều khiển của UI. Không có dịch vụ relay tự quản trong phạm vi bản đầu. |
-
-Đường dẫn, thư mục đích và mã kết nối là dữ liệu cục bộ nhạy cảm. Chỉ chuyển trường cần thiết qua IPC và runner. Không đưa mã vào log, lịch sử hay gói bằng chứng. Thư mục đích có quyền ghi và hành vi khi trùng tệp cần kiểm thử trước khi phân phối.
-
-## 5. Quyết định và đối chiếu giữa các góc nhìn
-
-| Mã | Quyết định | Lý do và hệ quả |
-| --- | --- | --- |
-| ADR-01 | Giữ Wails IPC thay cho HTTP backend riêng. | Một ứng dụng cục bộ đơn giản hơn, nhưng cần WebView2 và kiểm thử binding native. |
-| ADR-02 | Giữ `main.App` là bridge và tiêm `transfer.Service`. | Có thể test đơn vị backend không cần Wails. Contract vẫn phải đồng bộ hai ngôn ngữ. |
-| ADR-03 | Tích hợp Croc CLI thay vì viết giao thức riêng. | Tận dụng CLI, đổi lại phải khóa phiên bản, quản lý tiến trình và xác minh trên Windows. |
-
-VP-01 định nghĩa ranh giới FE-IPC/HOST mà VP-02 sử dụng. Mapping được ghi trong [đặc tả API](transfer-contract.md) và kiểm ở CC-T-02. VP-03 giải thích cách HOST đóng gói bundle FE, được kiểm ở CC-T-03 và CC-T-16. CLI chỉ xuất hiện như phụ thuộc mục tiêu ở VP-01, VP-02 và VP-03. Không dùng ba góc nhìn đó để khẳng định Croc đã cài hoặc truyền thành công.
-
-Rủi ro còn mở gồm cuộc đua giữa hủy và hoàn tất, đọc thiếu tiến độ từ Croc, dọn tiến trình con và khác biệt WebView2 giữa các máy. [Kế hoạch xác minh](verification.md) ghi các ca hồi quy và [thủ tục phát hành](release.md) ghi bằng chứng cần có trước bàn giao.
+Coordinator duy nhất hoặc vùng khóa ngắn quyết định cancel/finalize. Worker engine vận chuyển dữ liệu, worker I/O drain hai pipe đồng thời nếu có, và worker publish/dọn trả kết quả về coordinator. Worker không tự phát terminal. Không chờ I/O trong vùng khóa. Hủy có trạng thái ngay, stop via context/control pipe, chờ có hạn, rồi dừng cưỡng bức nếu cần. Với helper Windows, đánh giá Job Object kill-on-close và gắn tiến trình trước lúc cho nó chạy, fail closed nếu không bảo đảm quản lý cây. Không tuyên bố dọn xong chỉ vì tiến trình cha đã thoát. Nếu kill/wait thất bại, giữ khóa tài nguyên khi còn hoạt động, không publish.

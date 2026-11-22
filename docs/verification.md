@@ -1,48 +1,33 @@
-# V&V — Kế hoạch và đặc tả kiểm thử CrocCoc
+# V&V — Kế hoạch và hồ sơ kiểm thử
 
-| Mã | Phiên bản | Ngày | Trạng thái | Mã nguồn đối chiếu |
-| --- | --- | --- | --- | --- |
-| CC-VV-001 | 0.2 | 2026-11-19 | Kế hoạch, chưa nghiệm thu | `610b622` |
+**CC-VV-001 · 0.5 · 2026-11-19 · Kế hoạch.** Tham chiếu [ISO/IEC/IEEE 29119-3:2021](https://www.iso.org/standard/79429.html). Chạy theo lớp. Fixture không thay bằng chứng Wails/Croc native, còn Windows Server không thay máy người dùng sạch.
 
-Tham chiếu [ISO/IEC/IEEE 29119-3:2021](https://www.iso.org/standard/79429.html). Kế hoạch này định nghĩa phạm vi, môi trường, dữ liệu, thủ tục, kết quả kỳ vọng và hồ sơ chạy. [Ma trận truy vết](traceability.md) ánh xạ từ yêu cầu qua hợp đồng tới các ca. Kết quả từ mock chỉ xác minh mock và wire shape, không nghiệm thu truyền thật.
+| ID | Ca và tiêu chí đạt |
+| --- | --- |
+| CC-T-01 | `go test ./backend/...`. Kiểm stub unavailable, lỗi không phản chiếu mã, JSON init giữ 0 và trường vắng mặt. |
+| CC-T-02 | `npm --prefix frontend test` và `go test ./...` sau build frontend. Kiểm mock, adapter và bridge Go, truyền đúng tham số và tháo listener. |
+| CC-T-03 | `npm --prefix frontend run build` và `wails build -platform windows/amd64`. Ghi kết quả frontend và EXE riêng. |
+| CC-T-11 | Spike Windows. Sai nguồn/hash/pin, thiếu binary, giả version từ PATH, timeout probe. Chỉ thành phần đã xác minh được dùng. Kiểm riêng đường dẫn engine sạch và giải pháp dự phòng ADR. |
+| CC-T-12A | Hai đầu Windows, tệp/thư mục, Unicode và khoảng trắng, bỏ mục, hủy picker, nguồn khóa/thay/đổi tên, link/reparse phía gửi. Hai manifest khớp về đường dẫn, số byte và SHA-256. Nếu có Explorer, kiểm đúng ID và lỗi OS không đổi kết quả truyền. |
+| CC-T-12B | Windows NTFS C: và D:. Tên thiết bị, dấu chấm/khoảng trắng cuối, ADS, bidi, trùng theo case/alias 8.3, vượt đường dẫn, quota, giới hạn số mục và tổng byte. Thử danh sách trùng nội bộ, đích có root trùng, đích đổi sau consent, trùng tại publish, đổi tổ tiên/reparse point và rollback lỗi. Ghi bằng chứng **không yêu cầu/ghi payload trước consent**, kể cả khi từ chối. Thử crash trước/sau ghi sổ, staging giả/không có record, đích offline, runner còn sống và crash giữa publish. Chỉ dọn staging xác minh được. So hash/tên mục đích sẵn có. |
+| CC-T-13A | Fixture Go/TS. Event trước Promise, event cuối mất, snapshot đến đảo, revision trùng/sai, ID cũ, lỗi trước bind. Race hủy thắng/thua, lặp hủy, timeout peer/consent/dọn. Kỳ vọng `CANCELLING` trước đợi I/O, đúng một terminal, không publish sau hủy thắng, không mở phiên khi còn tài nguyên. Lỗi dùng code ổn định. |
+| CC-T-13B | Wails/Croc Windows. Hủy khi chờ/nhận đề nghị/đang truyền, đóng app đang chạy, process con giữ pipe, lần mở app thứ hai. Ghi timestamp, process/pipe/handle đã thoát, staging đã dọn, trạng thái UI. Kiểm lỗi reject/snapshot thật. Thử luồng bàn phím/trình đọc màn hình, không tự đọc mã kết nối. |
+| CC-T-14A | Dùng mã đánh dấu riêng và mẫu rò đối chứng. Cho phép đúng giá trị ở đối số CC-API-03 và `connectionCode` của CC-API-05/06 với đúng phiên gửi còn chờ. Assert ngoại lệ theo trường/ID/state, không bỏ qua cả IPC/event. Quét reject, terminal, snapshot chẩn đoán, argv, log, telemetry, config, artifact. Mẫu đối chứng rò ở field khác phải bị bắt. Kiểm cả redaction báo cáo và preview xuất log. |
+| CC-T-14B | Engine pin thật trên Windows. Clipboard giữ nguyên trước click kể cả hủy/lỗi. Nếu có Sao chép, dán đúng mã, Win+V không chứa mã và máy thử đồng bộ thứ hai không nhận mã. Bật các tùy chọn clipboard trước khi thử, kiểm đối chứng bằng text không nhạy cảm để biết đồng bộ thực sự hoạt động. Ép Win32 lỗi lúc đặt marker, xác nhận không ghi mã, click sai ID hoặc trạng thái không ghi. Quét argv/env theo phạm vi TM, không trích xuất mã vào bằng chứng. |
+| CC-T-15A | Fixture wire. Byte thiếu, `"0"`, trên 2^53, tối đa int64, âm, JSON number, `null`, vượt miền hoặc transferred > total. UI chỉ tính phần trăm từ cặp hợp lệ, tổng 0 hiển thị không xác định. `progress` cũ không quyết định UI hoặc terminal. |
+| CC-T-15B | Hai máy hai mạng, định danh fixture lớn, ghi tuyến relay thực và xác nhận không fallback sang đường ngoài chính sách. So SHA-256, kiểm file đơn và nhiều mục. Kiểm thao tác hủy/giao diện còn phản hồi khi đang truyền. Không suy tuyến relay chỉ từ việc dùng hai mạng. |
+| CC-T-16A | Windows 10 x64 sạch. Gói ứng viên, phát hiện/cài WebView2 khi thiếu, mở UI, gọi binding và xác minh engine thực thi đúng định danh, không lấy từ PATH. Kiểm firewall, SmartScreen và Defender. |
+| CC-T-16B | Lặp CC-T-16A trên Windows 11 x64 sạch với cùng hash gói cuối. MVP nội bộ cần smoke Windows 11, không dùng smoke đó thay kiểm gói ứng viên. |
 
-## 1. Phạm vi và điều kiện vào
+Giữ ID và dùng các tiểu mục trong kết quả chạy để phân biệt fixture, Windows native và gói ứng viên. Ghi Git SHA, phiên bản tài liệu, Windows/WebView2, engine, tuyến mạng, hash gói/binary, fixture và kết quả đã lọc. Dùng dữ liệu thử, không ghi mã, đường dẫn cá nhân hay output thô. Thiếu điều kiện ghi `BLOCKED`, chưa chạy ghi `NOT RUN`, không vượt qua fixture ghi `FAIL`, đủ tiêu chí và bằng chứng ghi `PASS`.
 
-| Cấp | Đối tượng | Điều kiện chạy |
-| --- | --- | --- |
-| Đơn vị | Dịch vụ Go, mock, adapter TS | Chạy trên mã nguồn có SHA cụ thể. Backend độc lập không cần bundle, UI mock không cần Go. |
-| Tích hợp | Go bridge, serialization, bundle frontend, binding native | Chạy full Go sau khi build frontend. Smoke Wails cần EXE Windows phù hợp và WebView2. |
-| Nghiệm thu | Gửi/nhận Croc thật, hủy, lỗi, relay, toàn vẹn | Hai máy kiểm thử, Croc đúng bản pin, quyền đọc/ghi có kiểm soát, fixture không nhạy cảm, có phương tiện đối chiếu SHA-256. Ca relay cần hai mạng tách biệt và phải xác nhận đường truyền thực. |
+## Kết quả biết được
 
-Trước ca nghiệm thu, ghi Windows build, kiến trúc, WebView2, phiên bản app, SHA nguồn, phiên bản Croc, cấu hình mạng và danh sách fixture. Dùng một tệp nhỏ, một thư mục có tệp lồng nhau, một tên Unicode có khoảng trắng và một tệp lớn với số byte ghi trước khi chạy. Đích sạch cho ca mặc định, đích có quyền hạn hoặc tệp trùng tên cho ca biên. Đừng sử dụng thư mục cá nhân.
-
-## 2. Ca khởi tạo và kiểm thử tự động
-
-| Mã | Thủ tục | Kết quả kỳ vọng | Bằng chứng |
-| --- | --- | --- | --- |
-| CC-T-01 | `go test ./backend/...` | Dịch vụ stub báo unavailable, lệnh truyền/hủy không giả thành công và không phản chiếu mã. Serialize đúng `transferID`, trạng thái, thiếu `progress` và `progress:0`. | [Test dịch vụ Go](../backend/transfer/service_test.go), log thực thi. |
-| CC-T-02 | `npm --prefix frontend test`. Sau build frontend, chạy `go test ./...`. | Mock đúng thứ tự và ID, từ chối phiên thứ hai, hủy không phát muộn. Adapter ánh xạ đối số và event, hủy listener. Go bridge giữ tham số Unicode, giá trị và lỗi. | [Test mock](../frontend/src/mockTransfer.test.mjs), [test adapter](../frontend/src/adapters/wailsTransfer.test.mjs), [test bridge](../app_test.go). |
-| CC-T-03 | `npm --prefix frontend run build`, sau đó `wails build -platform windows/amd64`. | Frontend tạo bundle. Wails dùng bundle đó tạo EXE Windows x64 khi môi trường đầy đủ. Hai kết quả ghi riêng. | Log build, tên và SHA-256 artifact nếu có. |
-
-## 3. Ca tích hợp và nghiệm thu mục tiêu
-
-| Mã | Tiền điều kiện và bước chính | Kết quả đạt | Bằng chứng cần lưu |
-| --- | --- | --- | --- |
-| CC-T-11 | Thử bản pin, thiếu binary, sai phiên bản và binary không chạy được. Đọc `GetCrocInfo()` và thử bắt đầu với ca không khả dụng. | Chỉ binary đúng được báo khả dụng. Không có ID giả khi không khởi tạo được. Lỗi nêu hướng khắc phục. | Kết quả đã lọc đường dẫn, phiên bản, mã lỗi hoặc mô tả. |
-| CC-T-12 | Chọn một tệp, sau đó chọn tập nhiều mục có thư mục Unicode, bỏ một mục, tạo mã và nhận vào thư mục đã chọn. Mở thư mục từ UI. | Mục bị bỏ không truyền. Mã sao chép dùng được. Đích đúng và danh sách, dung lượng, cấu trúc, SHA-256 khớp. Không lưu mã trong bằng chứng. | Manifest nguồn/đích và ảnh đã che mã. |
-| CC-T-13 | Quan sát ID và trạng thái, thử mở phiên thứ hai, hủy khi chờ và khi đang truyền ở cả hai vai trò. Thử ID sai, hủy lại và bắt đầu phiên mới. | Một phiên hoạt động, sai ID không hủy nhầm. Một trạng thái cuối mỗi phiên. Không event muộn hoặc tiến trình con bị bỏ lại. Phiên mới được phép sau khi dọn xong. | Dòng thời gian theo ID, kiểm tra tiến trình, kết quả các lần hủy. |
-| CC-T-14 | Thử mã sai, đích không ghi được, nguồn không còn, mất mạng và Croc thoát lỗi. Rà log, cấu hình, telemetry nếu có, đối số dòng lệnh, thông báo và báo cáo test. | Trước khi tạo phiên thì reject. Sau khi có phiên thì `FAILED`. UI vẫn phản hồi. Không tìm thấy mã kết nối, không có stderr thô trong thông báo công khai. | Bước tái hiện và kết quả rà soát đã lọc bí mật. |
-| CC-T-15 | Dùng fixture đã ghi kích thước, truyền giữa hai mạng qua relay đã xác nhận. Theo dõi tương tác UI và nguồn số đo. | UI phản hồi, chỉ hiện tiến độ khi có dữ liệu tin cậy. Dung lượng, SHA-256 và cấu trúc khớp. | Bằng chứng relay không chứa mã, manifest nguồn/đích và log trạng thái đã lọc. |
-| CC-T-16 | Mở đúng artifact trên Windows 10 và 11 x64 có WebView2. Xác minh mở UI và gọi binding cho bản Croc đi kèm. | Cả hai hệ điều hành mở được, UI tải và phiên bản Croc đúng bản pin. | SHA-256 artifact, bản Windows, WebView2 và kết quả binding. |
-
-CC-T-11 đến CC-T-16 đều **chưa nghiệm thu** tại baseline này. [Thủ tục phát hành](release.md) dùng các ca này làm điều kiện bàn giao. Không đóng yêu cầu nếu ca bắt buộc chưa chạy, bị chặn hoặc thiếu bằng chứng.
-
-## 4. Hồ sơ kết quả baseline và mẫu cho lần chạy sau
-
-| Run | Môi trường và phạm vi | Kết quả tại lúc chốt init |
-| --- | --- | --- |
-| CC-RUN-INIT-01 | Windows phát triển, nguồn `610b622`, `npm --prefix frontend test` | **PASS** — 4/4 test mock và adapter, phần frontend của CC-T-02. |
-| CC-RUN-INIT-02 | Cùng baseline, `npm --prefix frontend run build` | **PASS** — tạo bundle Vite, chỉ phần frontend của CC-T-03. |
-| CC-RUN-INIT-03 | Cùng baseline, các bước cần Go/Wails | **BLOCKED / NOT RUN** — máy chạy không tìm thấy Go trên PATH. Không có kết quả Go, native EXE hoặc smoke từ lần chốt này. |
-
-Mỗi lần chạy tiếp ghi ID run, ID ca, SHA hoặc SHA-256 artifact, ngày và người chạy, môi trường, dữ liệu mẫu, bước thực tế, kết quả quan sát, kết luận `PASS` / `FAIL` / `BLOCKED` / `NOT RUN` và liên kết bằng chứng hoặc lỗi. Tách rõ ca không chạy với ca chạy thất bại. Bằng chứng phải ẩn mã, tên tệp cá nhân và đường dẫn chứa danh tính.
+| Run | Kết quả |
+| --- | --- |
+| CC-RUN-INIT-01/02 | Frontend test 4/4 và build frontend PASS tại baseline `610b622` theo hồ sơ init, không phải bằng chứng EXE. |
+| CC-RUN-INIT-03 | Go/Wails native bị chặn tại init, không có bằng chứng PASS. |
+| CC-RUN-DOC05-01 | Windows phát triển, 2026-11-19, mã nguồn init trên HEAD `e7e46ad`, working tree thay tài liệu. Test frontend PASS 4/4 và build frontend PASS. |
+| CC-RUN-DOC05-02 | Cùng checkout Windows. `go test ./backend/...` và `go test ./...` BLOCKED do `go` không có trên PATH. Wails native không chạy. |
+| CC-RUN-WIN-01 | Windows amd64, 2026-11-23, Go 1.27.4 (`E:\go`), Node 24+. `npm --prefix frontend test` PASS (18/18, gồm hai phiên liên tiếp + snapshot + BigInt progress + adapter missing-binding), `npm --prefix frontend run build` PASS (`tsc --noEmit` + Vite build), `go test -count=1 ./...` PASS (gồm test thật Win32 clipboard message-only HWND + 3 privacy markers, Windows Job Object kill-on-close, bounded `Shutdown()`, `GetTransferSnapshot`, staging/publish/recovery NTFS), `go vet ./...` PASS (0 cảnh báo). |
+| CC-T-11–16 (E2E gói ứng viên / 2 máy thật) | NOT RUN. Đã có bằng chứng unit/native Windows cục bộ cho clipboard, Job Object, staging/publish, nhưng chưa chạy đóng gói EXE và truyền 2 máy thật qua relay. |
