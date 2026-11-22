@@ -66,6 +66,10 @@ func startWorker(ctx context.Context, path string) (*exec.Cmd, *workerJob, io.Wr
 	workerCtx, cancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(workerCtx, path)
 	cmd.WaitDelay = WorkerCleanupTimeout
+	if err := prepareWorkerCommand(cmd); err != nil {
+		cancel()
+		return nil, nil, nil, nil, nil, ErrWorkerUnavailable
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		cancel()
