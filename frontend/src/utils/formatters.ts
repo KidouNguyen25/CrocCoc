@@ -1,5 +1,30 @@
 import type { TransferState } from '../transfer.ts'
 
+const DECIMAL_UINT_RE = /^\d+$/
+
+/**
+ * Compute exact transfer percentage from decimal byte strings or numbers using BigInt.
+ * Returns undefined when total is missing, invalid, or zero (indeterminate progress).
+ */
+export function computeProgressPercent(
+  bytesTransferred?: number | string,
+  bytesTotal?: number | string,
+): number | undefined {
+  if (bytesTransferred === undefined || bytesTotal === undefined) return undefined
+  const tStr = typeof bytesTransferred === 'number'
+    ? (Number.isInteger(bytesTransferred) && bytesTransferred >= 0 ? String(bytesTransferred) : '')
+    : bytesTransferred
+  const totalStr = typeof bytesTotal === 'number'
+    ? (Number.isInteger(bytesTotal) && bytesTotal >= 0 ? String(bytesTotal) : '')
+    : bytesTotal
+  if (!DECIMAL_UINT_RE.test(tStr) || !DECIMAL_UINT_RE.test(totalStr)) return undefined
+  const transferred = BigInt(tStr)
+  const total = BigInt(totalStr)
+  if (total <= 0n || transferred > total) return undefined
+  const basisPoints = (transferred * 10000n) / total
+  return Number(basisPoints) / 100
+}
+
 /**
  * Format bytes into human readable format (B, KB, MB, GB, TB).
  */
@@ -54,20 +79,24 @@ export function formatDuration(seconds?: number): string {
  * Calculate estimated time remaining (ETA).
  */
 export function calculateETA(
-  bytesTransferred?: number,
-  bytesTotal?: number,
+  bytesTransferred?: number | string,
+  bytesTotal?: number | string,
   bytesPerSecond?: number,
 ): string {
+  const transferred = typeof bytesTransferred === 'string' ? Number(bytesTransferred) : bytesTransferred
+  const total = typeof bytesTotal === 'string' ? Number(bytesTotal) : bytesTotal
   if (
-    bytesTransferred === undefined ||
-    bytesTotal === undefined ||
+    transferred === undefined ||
+    total === undefined ||
+    isNaN(transferred) ||
+    isNaN(total) ||
     bytesPerSecond === undefined ||
     bytesPerSecond <= 0 ||
-    bytesTransferred >= bytesTotal
+    transferred >= total
   ) {
     return ''
   }
-  const remainingBytes = bytesTotal - bytesTransferred
+  const remainingBytes = total - transferred
   const seconds = remainingBytes / bytesPerSecond
   return formatDuration(seconds)
 }
@@ -89,11 +118,11 @@ export const STATE_DESCRIPTIONS: Record<TransferState, string> = {
   IDLE: 'Chọn tệp để gửi hoặc nhập mã để nhận.',
   PREPARING: 'Đang khởi tạo phiên và kiểm tra dữ liệu...',
   WAITING_FOR_PEER: 'Đang chờ thiết bị bên kia kết nối...',
-  AWAITING_ACCEPTANCE: 'Đã gửi danh sách tệp, chờ người nhận đồng ý...',
-  TRANSFERRING: 'Dữ liệu đang được truyền an toàn qua Croc...',
-  FINALIZING: 'Đang kiểm tra tính toàn vẹn (SHA-256) và lưu tệp...',
+  AWAITING_ACCEPTANCE: 'Đã nhận danh sách tệp, chờ người nhận đồng ý...',
+  TRANSFERRING: 'Dữ liệu đang được truyền mã hóa qua Croc...',
+  FINALIZING: 'Đang xác minh toàn vẹn và công bố tệp vào thư mục đích...',
   CANCELLING: 'Đang dọn dẹp và kết thúc tiến trình...',
-  COMPLETED: 'Tệp đã được truyền thành công và xác thực tính toàn vẹn.',
+  COMPLETED: 'Tệp đã được truyền thành công và xác thực toàn vẹn.',
   FAILED: 'Đã xảy ra lỗi trong quá trình truyền tệp.',
   CANCELLED: 'Phiên truyền tệp đã được người dùng chủ động hủy.',
 }

@@ -80,3 +80,20 @@ test('desktop adapter delegates CopySendCode and GetTransferSnapshot', async () 
   assert.deepEqual(await client.getTransferSnapshot('send-1'), { transferID: 'send-1', revision: 2, state: 'WAITING_FOR_PEER' })
   assert.equal(await client.getTransferSnapshot('missing'), null)
 })
+
+test('desktop adapter fails loudly when required Wails bindings are missing', async () => {
+  const host = {
+    go: { main: { App: {
+      GetCrocInfo: async () => ({ available: true }),
+      StartSend: async () => 'id',
+      StartReceive: async () => 'id',
+      CancelTransfer: async () => true,
+    } } },
+    runtime: { EventsOn: () => () => {} },
+  }
+  const client = getDesktopClient(host)
+  await assert.rejects(() => client.selectPaths('sendFiles'), /SelectPaths/)
+  await assert.rejects(() => client.copySendCode('id'), /CopySendCode/)
+  await assert.rejects(() => client.getTransferSnapshot('id'), /GetTransferSnapshot/)
+  await assert.rejects(() => client.decideReceive('id', 'offer', true), /DecideReceive/)
+})

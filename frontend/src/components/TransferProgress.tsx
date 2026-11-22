@@ -2,6 +2,7 @@ import { useState } from 'react'
 import type { TransferUpdate } from '../transfer.ts'
 import { isRunning } from '../transfer.ts'
 import {
+  computeProgressPercent,
   formatBytes,
   formatSpeed,
   calculateETA,
@@ -46,6 +47,7 @@ export function TransferProgress({
     cleanupPending,
   } = update
 
+  const computedProgress = computeProgressPercent(bytesTransferred, bytesTotal) ?? progress
   const active = isRunning(state)
   const codeToShow = update.connectionCode || connectionCode
   const eta = calculateETA(bytesTransferred, bytesTotal, bytesPerSecond)
@@ -137,13 +139,13 @@ export function TransferProgress({
       {(state === 'TRANSFERRING' || state === 'FINALIZING') && (
         <div className="progress-section">
           <div className="progress-bar-container">
-            {progress !== undefined ? (
+            {computedProgress !== undefined ? (
               <div
                 className="progress-bar-fill"
-                style={{ width: `${Math.min(100, Math.max(0, progress))}%` }}
+                style={{ width: `${Math.min(100, Math.max(0, computedProgress))}%` }}
                 role="progressbar"
                 aria-label="Tiến độ truyền tệp"
-                aria-valuenow={Math.round(progress)}
+                aria-valuenow={Math.round(computedProgress)}
                 aria-valuemin={0}
                 aria-valuemax={100}
               />
@@ -151,8 +153,8 @@ export function TransferProgress({
               <div className="progress-bar-indeterminate" />
             )}
           </div>
-          {progress !== undefined && (
-            <div className="progress-percent">{Math.round(progress)}%</div>
+          {computedProgress !== undefined && (
+            <div className="progress-percent">{Math.round(computedProgress)}%</div>
           )}
         </div>
       )}

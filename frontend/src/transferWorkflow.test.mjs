@@ -101,3 +101,45 @@ test('startup does not overwrite early native events and ignores stale revisions
   assert.equal(completed.state, 'COMPLETED')
   assert.equal(acceptTransferUpdate(completed, { transferID: 'send-1', revision: 5, state: 'FAILED' }), completed)
 })
+
+test('second consecutive session preserves early WAITING_FOR_PEER and reconciles snapshot', async () => {
+  const { createTransferSessionTracker } = await import('./transfer.ts')
+  const { computeProgressPercent } = await import('./utils/formatters.ts')
+  const tracker = createTransferSessionTracker()
+
+  // Session 1 completes to terminal state.
+  tracker.beginStart()
+  tracker.resolveStart('send-1')
+  const done1 = tracker.onEvent({ transferID: 'send-1', revision: 3, state: 'COMPLETED' })
+  assert.equal(done1?.state, 'COMPLETED')
+
+  // Session 2 starts WITHOUT explicit reset; early event arrives before StartSend resolves.
+  tracker.beginStart()
+  assert.equal(
+    tracker.onEvent({ transferID: 'send-2', revision: 2, state: 'WAITING_FOR_PEER', connectionCode: 'second-code' }),
+    undefined,
+  )
+  const started2 = tracker.resolveStart('send-2')
+  assert.equal(started2.hadBuffered, true)
+  assert.equal(started2.update.state, 'WAITING_FOR_PEER')
+  assert.equal(started2.update.connectionCode, 'second-code')
+
+  // Session 3 starts with NO early event; GetTransferSnapshot reconciles code and state.
+  tracker.beginStart()
+  const started3 = tracker.resolveStart('send-3')
+  assert.equal(started3.hadBuffered, false)
+  assert.equal(started3.update.state, 'PREPARING')
+  const reconciled = tracker.reconcileSnapshot('send-3', {
+    transferID: 'send-3',
+    revision: 2,
+    state: 'WAITING_FOR_PEER',
+    connectionCode: 'third-code',
+  })
+  assert.equal(reconciled?.state, 'WAITING_FOR_PEER')
+  assert.equal(reconciled?.connectionCode, 'third-code')
+
+  // Exact BigInt progress calculation from decimal string wire pair.
+  assert.equal(computeProgressPercent('5000000000000000', '10000000000000000'), 50)
+  assert.equal(computeProgressPercent('0', '0'), undefined)
+  assert.equal(computeProgressPercent('150', '100'), undefined)
+})

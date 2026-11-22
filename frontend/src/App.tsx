@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef, useMemo } from 'react'
 import { getDesktopClient } from './adapters/wailsTransfer.ts'
 import { createMockTransferClient } from './mockTransfer.ts'
-import { acceptTransferUpdate, isRunning, preserveStartedTransferUpdate } from './transfer.ts'
+import { createTransferSessionTracker, isRunning } from './transfer.ts'
 import type { CrocInfo, TransferClient, TransferUpdate } from './transfer.ts'
 import { Header } from './components/Header.tsx'
 import { ModeSwitcher } from './components/ModeSwitcher.tsx'
@@ -23,9 +23,17 @@ export function App() {
   // Create persistent mock client instance for browser preview
   const mockClient = useMemo(() => createMockTransferClient(), [])
   const clientRef = useRef<TransferClient>(mockClient)
-  const activeTransferID = useRef<string | undefined>(undefined)
-  const awaitingStart = useRef(false)
-  const earlyUpdates = useRef(new Map<string, TransferUpdate>())
+  const trackerRef = useRef(createTransferSessionTracker())
+
+  const applyTrackedUpdate = (next: TransferUpdate | undefined) => {
+    if (!next) return
+    setUpdate(next)
+    if (next.connectionCode) {
+      setConnectionCode(next.connectionCode)
+    } else if (next.state !== 'WAITING_FOR_PEER' && next.state !== 'PREPARING') {
+      setConnectionCode('')
+    }
+  }
 
   // Identify runtime environment and active client
   useEffect(() => {
@@ -56,21 +64,7 @@ export function App() {
 
     // Subscribe to transfer events
     const unsubscribe = clientRef.current.subscribe((event) => {
-      if (!event.transferID) return
-      if (awaitingStart.current && !activeTransferID.current) {
-        earlyUpdates.current.set(
-          event.transferID,
-          acceptTransferUpdate(earlyUpdates.current.get(event.transferID), event),
-        )
-        return
-      }
-      if (event.transferID !== activeTransferID.current) return
-      setUpdate((current) => acceptTransferUpdate(current, event))
-      if (event.connectionCode) {
-        setConnectionCode(event.connectionCode)
-      } else if (event.state !== 'WAITING_FOR_PEER' && event.state !== 'PREPARING') {
-        setConnectionCode('')
-      }
+      applyTrackedUpdate(trackerRef.current.onEvent(event))
     })
 
     return () => {
@@ -82,38 +76,27 @@ export function App() {
   const busy = pending || isRunning(state)
 
   const beginTransfer = async (request: () => Promise<string>, fallbackError: string) => {
-    // The native engine can emit a WAITING/FAILED event before Start* resolves.
-    // Buffer it by ID and never overwrite it with a synthetic PREPARING state.
-    awaitingStart.current = true
-    activeTransferID.current = undefined
-    earlyUpdates.current.clear()
+    // Buffer events by ID before Start* resolves and never let a previous
+    // terminal session block a newly started session.
+    trackerRef.current.beginStart()
     setPending(true)
     setAppError('')
     setConnectionCode('')
     setUpdate(undefined)
     try {
       const transferID = await request()
-      activeTransferID.current = transferID
-      awaitingStart.current = false
-      const buffered = earlyUpdates.current.get(transferID)
-      earlyUpdates.current.clear()
-      setUpdate((current) => {
-        const initial = preserveStartedTransferUpdate(current, transferID)
-        return buffered ? acceptTransferUpdate(initial, buffered) : initial
-      })
-      if (buffered?.connectionCode) setConnectionCode(buffered.connectionCode)
-      if (!buffered && clientRef.current.getTransferSnapshot) {
+      const { update: started, hadBuffered } = trackerRef.current.resolveStart(transferID)
+      applyTrackedUpdate(started)
+      if (!hadBuffered && clientRef.current.getTransferSnapshot) {
         void clientRef.current.getTransferSnapshot(transferID).then((snapshot) => {
-          if (!snapshot || activeTransferID.current !== transferID) return
-          setUpdate((current) => acceptTransferUpdate(current, snapshot))
+          applyTrackedUpdate(trackerRef.current.reconcileSnapshot(transferID, snapshot))
         }).catch(() => {})
       }
     } catch (err) {
+      trackerRef.current.failStart()
       setAppError(err instanceof Error ? err.message : fallbackError)
       throw err
     } finally {
-      awaitingStart.current = false
-      earlyUpdates.current.clear()
       setPending(false)
     }
   }
@@ -161,9 +144,7 @@ export function App() {
   }
 
   const handleReset = () => {
-    activeTransferID.current = undefined
-    awaitingStart.current = false
-    earlyUpdates.current.clear()
+    trackerRef.current.reset()
     setUpdate(undefined)
     setConnectionCode('')
     setAppError('')
