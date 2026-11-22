@@ -33,26 +33,26 @@ func FinalizeNativeReceive(
 	}
 	result, err := publishAuditedRoots(lease, stage, entries)
 	if err != nil {
-		if failed, advanced := c.Advance(id, Failed); advanced {
+		if failed, advanced := c.Fail(id, err); advanced {
 			snapshot = failed
 		}
 		return snapshot, result, err
 	}
 	if err := cleanupPublishedReceiveStage(lease, stage); err != nil {
-		if failed, advanced := c.Advance(id, Failed); advanced {
+		if failed, advanced := c.Fail(id, err); advanced {
 			snapshot = failed
 		}
 		return snapshot, result, err
 	}
 	if err := stage.Close(); err != nil {
-		failed, advanced := c.Advance(id, Failed)
+		failed, advanced := c.Fail(id, ErrReceiveFinalization)
 		if advanced {
 			snapshot = failed
 		}
 		return snapshot, result, ErrReceiveFinalization
 	}
 	if err := lease.Close(); err != nil {
-		failed, advanced := c.Advance(id, Failed)
+		failed, advanced := c.Fail(id, ErrReceiveFinalization)
 		if advanced {
 			snapshot = failed
 		}

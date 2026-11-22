@@ -350,3 +350,44 @@ func TestGetTransferUpdateRestoresMissedFailedErrorCCT13A(t *testing.T) {
 		t.Fatalf("snapshot did not restore FAILED error after missed event: %+v, %t", update, ok)
 	}
 }
+
+func TestFinalizePublishFailurePreservesErrorInEventAndSnapshot(t *testing.T) {
+	entries := []ManifestEntry{{Path: "received.txt", SizeBytes: 2}}
+	lease, stage, destination := publishFixture(t, entries)
+	if err := os.WriteFile(filepath.Join(destination, "received.txt"), []byte("existing"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	updates := new([]Update)
+	service := &engineService{
+		cfg: EngineServiceConfig{EventSink: func(update Update) { *updates = append(*updates, update) }},
+	}
+	started, err := service.coordinator.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, state := range []State{WaitingForPeer, Transferring} {
+		if _, ok := service.coordinator.Advance(started.TransferID, state); !ok {
+			t.Fatalf("failed to enter %s", state)
+		}
+	}
+
+	failed, result, err := FinalizeNativeReceive(&service.coordinator, started.TransferID, lease, stage, entries)
+	if !errors.Is(err, ErrPublishFailed) || failed.State != Failed || failed.Error == nil || failed.Error.Code != "PUBLISH_FAILED" {
+		t.Fatalf("publish failure was not stored in coordinator: snapshot=%+v err=%v", failed, err)
+	}
+	service.finishReceiveSession(started.TransferID, err, result.Partial, true)
+	wantMessage := transferError(ErrPublishFailed).Message
+	if len(*updates) != 1 || (*updates)[0].State != Failed || (*updates)[0].Error == nil ||
+		(*updates)[0].Error.Code != "PUBLISH_FAILED" || (*updates)[0].Error.Message != wantMessage {
+		t.Fatalf("FAILED event lost PUBLISH_FAILED: %+v", *updates)
+	}
+	snapshot, ok := service.GetTransferSnapshot(started.TransferID)
+	if !ok || snapshot.State != Failed || snapshot.Error == nil || snapshot.Error.Code != "PUBLISH_FAILED" || snapshot.Error.Message != wantMessage {
+		t.Fatalf("transfer snapshot lost PUBLISH_FAILED: %+v, %t", snapshot, ok)
+	}
+	update, ok := service.GetTransferUpdate(started.TransferID)
+	if !ok || update.State != Failed || update.Error == nil || update.Error.Code != "PUBLISH_FAILED" || update.Error.Message != wantMessage {
+		t.Fatalf("snapshot lost PUBLISH_FAILED: %+v, %t", update, ok)
+	}
+}
