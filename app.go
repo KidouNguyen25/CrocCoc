@@ -160,6 +160,15 @@ func (a *App) beforeClose(ctx context.Context) bool {
 	return false
 }
 
+func closeConfirmationDialogMessage(state transfer.State) (string, string) {
+	if state == transfer.Finalizing {
+		return "Đang hoàn tất công bố tệp",
+			"Phiên truyền đã qua mốc khóa và đang công bố tệp vào đích (không thể hủy phiên ở bước này). Thoát lúc này có thể làm gián đoạn hoàn tất và để lại kết quả một phần. Bạn vẫn muốn đóng ứng dụng?"
+	}
+	return "Xác nhận đóng CrocCoc",
+		"Phiên truyền tệp đang xử lý dữ liệu. Bạn có muốn hủy phiên và thoát ứng dụng không?"
+}
+
 func (a *App) confirmActiveClose(ctx context.Context, state transfer.State) bool {
 	a.mu.RLock()
 	confirm := a.confirmClose
@@ -174,10 +183,11 @@ func (a *App) confirmActiveClose(ctx context.Context, state transfer.State) bool
 	if ctx == nil {
 		return true
 	}
+	title, message := closeConfirmationDialogMessage(state)
 	choice, err := wailsruntime.MessageDialog(ctx, wailsruntime.MessageDialogOptions{
 		Type:          wailsruntime.QuestionDialog,
-		Title:         "Xác nhận đóng CrocCoc",
-		Message:       "Phiên truyền tệp đang xử lý dữ liệu. Bạn có muốn hủy phiên và thoát ứng dụng không?",
+		Title:         title,
+		Message:       message,
 		Buttons:       []string{"Yes", "No"},
 		DefaultButton: "No",
 		CancelButton:  "No",

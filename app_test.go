@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	"croccoc/backend/transfer"
@@ -196,5 +197,14 @@ func TestBeforeClosePromptsDuringTransferringAndFinalizing(t *testing.T) {
 	}
 	if !controller.shutdownRan {
 		t.Fatal("expected shutdown to run on non-prompted close")
+	}
+
+	transferringTitle, transferringMsg := closeConfirmationDialogMessage(transfer.Transferring)
+	if transferringTitle == "" || !strings.Contains(transferringMsg, "hủy phiên") {
+		t.Fatalf("expected transferring dialog to mention cancelling session, got %q: %q", transferringTitle, transferringMsg)
+	}
+	finalizingTitle, finalizingMsg := closeConfirmationDialogMessage(transfer.Finalizing)
+	if finalizingTitle == "" || !strings.Contains(finalizingMsg, "không thể hủy") || !strings.Contains(finalizingMsg, "công bố") {
+		t.Fatalf("expected finalizing dialog to explain non-cancellable publish stage, got %q: %q", finalizingTitle, finalizingMsg)
 	}
 }
