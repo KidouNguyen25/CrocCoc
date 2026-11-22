@@ -44,24 +44,12 @@ func (a *App) DecideReceive(transferID, offerID string, accept bool) (bool, erro
 	return controller.DecideReceive(transferID, offerID, accept)
 }
 
-func (a *App) GetReceiveOffer(transferID string) *transfer.ReceiveOffer {
+func (a *App) GetTransferSnapshot(transferID string) *transfer.Update {
 	controller, ok := a.transfers.(transfer.EngineController)
 	if !ok {
 		return nil
 	}
-	offer, found := controller.GetReceiveOffer(transferID)
-	if !found {
-		return nil
-	}
-	return &offer
-}
-
-func (a *App) GetTransferSnapshot(transferID string) *transfer.SessionSnapshot {
-	controller, ok := a.transfers.(transfer.EngineController)
-	if !ok {
-		return nil
-	}
-	snapshot, found := controller.GetTransferSnapshot(transferID)
+	snapshot, found := controller.GetTransferUpdate(transferID)
 	if !found {
 		return nil
 	}

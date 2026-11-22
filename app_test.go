@@ -54,9 +54,6 @@ func TestWailsBridgeDelegatesToService(t *testing.T) {
 	if snap := app.GetTransferSnapshot("send-id"); snap != nil {
 		t.Fatalf("expected nil snapshot for non-controller service, got %#v", snap)
 	}
-	if offer := app.GetReceiveOffer("send-id"); offer != nil {
-		t.Fatalf("expected nil offer for non-controller service, got %#v", offer)
-	}
 	if err := app.CopySendCode("send-id"); !errors.Is(err, transfer.ErrNotIntegrated) {
 		t.Fatalf("expected ErrNotIntegrated for CopySendCode, got %v", err)
 	}
@@ -68,6 +65,7 @@ func TestWailsBridgeDelegatesToService(t *testing.T) {
 type fakeControllerService struct {
 	recordingService
 	snapshot    *transfer.SessionSnapshot
+	update      *transfer.Update
 	offer       *transfer.ReceiveOffer
 	sendCode    string
 	decided     bool
@@ -93,6 +91,13 @@ func (f *fakeControllerService) GetTransferSnapshot(transferID string) (transfer
 	return transfer.SessionSnapshot{}, false
 }
 
+func (f *fakeControllerService) GetTransferUpdate(transferID string) (transfer.Update, bool) {
+	if f.update != nil && transferID == f.update.TransferID {
+		return *f.update, true
+	}
+	return transfer.Update{}, false
+}
+
 func (f *fakeControllerService) GetSendCode(transferID string) (string, bool) {
 	if f.sendCode != "" && transferID == "send-1" {
 		return f.sendCode, true
@@ -106,22 +111,20 @@ func (f *fakeControllerService) Shutdown() {
 
 func TestAppControllerBindingsReturnPointersAndFailClosedOnUnknownCopy(t *testing.T) {
 	controller := &fakeControllerService{
-		snapshot: &transfer.SessionSnapshot{TransferID: "recv-1", Revision: 2, State: transfer.WaitingForPeer},
-		offer:    &transfer.ReceiveOffer{OfferID: "offer-1", FileCount: 1, TotalBytes: "12"},
+		update: &transfer.Update{
+			TransferID:     "send-1",
+			Revision:       2,
+			State:          transfer.WaitingForPeer,
+			ConnectionCode: "secret-123",
+		},
 	}
 	app := newApp(controller)
 
 	if snap := app.GetTransferSnapshot("missing"); snap != nil {
 		t.Fatalf("expected nil snapshot for missing id, got %+v", snap)
 	}
-	if snap := app.GetTransferSnapshot("recv-1"); snap == nil || snap.Revision != 2 {
+	if snap := app.GetTransferSnapshot("send-1"); snap == nil || snap.Revision != 2 || snap.ConnectionCode != "secret-123" {
 		t.Fatalf("unexpected snapshot: %+v", snap)
-	}
-	if offer := app.GetReceiveOffer("missing"); offer != nil {
-		t.Fatalf("expected nil offer for missing id, got %+v", offer)
-	}
-	if offer := app.GetReceiveOffer("recv-1"); offer == nil || offer.OfferID != "offer-1" {
-		t.Fatalf("unexpected offer: %+v", offer)
 	}
 	if err := app.CopySendCode("missing"); !errors.Is(err, transfer.ErrCopyUnsafe) {
 		t.Fatalf("expected ErrCopyUnsafe for missing send code, got %v", err)
