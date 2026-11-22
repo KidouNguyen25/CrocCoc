@@ -18,6 +18,7 @@ type receiveDecision struct {
 type engineSession struct {
 	id               string
 	cancel           context.CancelFunc
+	done             chan struct{}
 	decision         chan receiveDecision
 	pending          *nativeReceiveOffer
 	stage            *ReceiveStage
@@ -38,11 +39,12 @@ func manifestTotalBytes(entries []ManifestEntry) int64 {
 }
 
 type engineService struct {
-	cfg         EngineServiceConfig
-	worker      *WorkerClient
-	workerPin   *SendSourceLease
-	recoveryErr error
-	coordinator Coordinator
+	cfg             EngineServiceConfig
+	worker          *WorkerClient
+	workerPin       *SendSourceLease
+	recoveryErr     error
+	coordinator     Coordinator
+	shutdownTimeout time.Duration
 
 	mu       sync.Mutex
 	sessions map[string]*engineSession
@@ -128,6 +130,7 @@ func (s *engineService) StartSend(paths []string) (string, error) {
 	session := &engineSession{
 		id:         waiting.TransferID,
 		cancel:     cancel,
+		done:       make(chan struct{}),
 		sources:    sources,
 		bytesTotal: manifestTotalBytes(manifest),
 	}
@@ -136,11 +139,13 @@ func (s *engineService) StartSend(paths []string) (string, error) {
 	s.sendCode[session.id] = code
 	s.mu.Unlock()
 	s.emit(waiting, "", code)
-	go s.runSend(ctx, session.id, code, paths, digest)
+	go s.runSend(ctx, session, code, paths, digest)
 	return session.id, nil
 }
 
-func (s *engineService) runSend(ctx context.Context, id, code string, paths []string, manifestDigest string) {
+func (s *engineService) runSend(ctx context.Context, session *engineSession, code string, paths []string, manifestDigest string) {
+	defer close(session.done)
+	id := session.id
 	err := s.worker.send(ctx, code, s.cfg.RelayAddress, s.cfg.RelayPassword, paths, manifestDigest, func() {
 		s.markSendTransferring(id)
 	}, func(delta int64) {
@@ -148,13 +153,13 @@ func (s *engineService) runSend(ctx context.Context, id, code string, paths []st
 	})
 	cleanupPending := errors.Is(err, ErrWorkerCleanupPending)
 	s.mu.Lock()
-	session := s.sessions[id]
+	live := s.sessions[id]
 	s.mu.Unlock()
-	if session == nil || session.sources == nil {
+	if live == nil || live.sources == nil {
 		if err == nil {
 			err = ErrSourceUnavailable
 		}
-	} else if !cleanupPending && session.sources.Close() != nil {
+	} else if !cleanupPending && live.sources.Close() != nil {
 		cleanupPending = true
 		err = ErrWorkerCleanupPending
 	}
@@ -205,7 +210,12 @@ func (s *engineService) StartReceive(code, outputDir string) (string, error) {
 		return "", ErrWorkerProtocol
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	session := &engineSession{id: waiting.TransferID, cancel: cancel, decision: make(chan receiveDecision, 1)}
+	session := &engineSession{
+		id:       waiting.TransferID,
+		cancel:   cancel,
+		done:     make(chan struct{}),
+		decision: make(chan receiveDecision, 1),
+	}
 	s.mu.Lock()
 	s.sessions[session.id] = session
 	s.mu.Unlock()
@@ -215,6 +225,7 @@ func (s *engineService) StartReceive(code, outputDir string) (string, error) {
 }
 
 func (s *engineService) runReceive(ctx context.Context, session *engineSession, code, outputDir string) {
+	defer close(session.done)
 	activationAttempted := false
 	err := s.worker.ReceiveAndContinueWithProgress(ctx, "", code, s.cfg.RelayAddress, s.cfg.RelayPassword,
 		func(offer ReceiveOffer) (bool, string, error) {
@@ -378,6 +389,42 @@ func (s *engineService) GetTransferSnapshot(id string) (SessionSnapshot, bool) {
 	return s.coordinator.Snapshot(id)
 }
 
+func (s *engineService) GetTransferUpdate(id string) (Update, bool) {
+	snapshot, ok := s.coordinator.Snapshot(id)
+	if !ok {
+		return Update{}, false
+	}
+	update := Update{
+		TransferID:     snapshot.TransferID,
+		Revision:       snapshot.Revision,
+		State:          snapshot.State,
+		PartialOutput:  snapshot.PartialOutput,
+		CleanupPending: snapshot.CleanupPending,
+	}
+	switch snapshot.State {
+	case WaitingForPeer:
+		s.mu.Lock()
+		code := s.sendCode[id]
+		s.mu.Unlock()
+		if code != "" {
+			update.ConnectionCode = code
+		}
+	case AwaitingAcceptance:
+		if offer, found := s.coordinator.GetReceiveOffer(id); found {
+			update.ReceiveOffer = &offer
+		}
+	case Transferring:
+		s.mu.Lock()
+		session := s.sessions[id]
+		if session != nil && session.bytesTotal > 0 {
+			update.BytesTransferred = strconv.FormatInt(session.bytesTransferred, 10)
+			update.BytesTotal = strconv.FormatInt(session.bytesTotal, 10)
+		}
+		s.mu.Unlock()
+	}
+	return update, true
+}
+
 func (s *engineService) CancelTransfer(id string) (bool, error) {
 	s.mu.Lock()
 	session := s.sessions[id]
@@ -390,7 +437,9 @@ func (s *engineService) CancelTransfer(id string) (bool, error) {
 		return false, nil
 	}
 	s.emit(snapshot, "", "")
-	session.cancel()
+	if session.cancel != nil {
+		session.cancel()
+	}
 	select {
 	case session.decision <- receiveDecision{accept: false}:
 	default:
@@ -402,19 +451,51 @@ func (s *engineService) Shutdown() {
 	if s == nil {
 		return
 	}
+	timeout := s.shutdownTimeout
+	if timeout <= 0 {
+		timeout = WorkerCleanupTimeout
+	}
 	s.mu.Lock()
 	ids := make([]string, 0, len(s.sessions))
-	for id := range s.sessions {
+	waitChans := make([]<-chan struct{}, 0, len(s.sessions))
+	for id, session := range s.sessions {
 		ids = append(ids, id)
+		if session != nil && session.done != nil {
+			waitChans = append(waitChans, session.done)
+		}
 	}
-	workerPin := s.workerPin
-	s.workerPin = nil
 	s.mu.Unlock()
+
 	for _, id := range ids {
 		_, _ = s.CancelTransfer(id)
 	}
-	if workerPin != nil {
-		_ = workerPin.Close()
+
+	allDone := true
+	if len(waitChans) > 0 {
+		deadline := time.NewTimer(timeout)
+		defer deadline.Stop()
+		for _, ch := range waitChans {
+			select {
+			case <-ch:
+			case <-deadline.C:
+				allDone = false
+			}
+			if !allDone {
+				break
+			}
+		}
+	}
+
+	// Only release the pinned worker lease after all active sessions have
+	// conclusively ended; otherwise keep it locked until OS process exit.
+	if allDone {
+		s.mu.Lock()
+		workerPin := s.workerPin
+		s.workerPin = nil
+		s.mu.Unlock()
+		if workerPin != nil {
+			_ = workerPin.Close()
+		}
 	}
 }
 
@@ -450,18 +531,13 @@ func (s *engineService) recordProgress(id string, delta int64) {
 		return
 	}
 	update := Update{
-		TransferID:       snapshot.TransferID,
-		Revision:         snapshot.Revision,
-		State:            snapshot.State,
-		BytesTransferred: &transferred,
+		TransferID: snapshot.TransferID,
+		Revision:   snapshot.Revision,
+		State:      snapshot.State,
 	}
 	if total > 0 {
-		update.BytesTotal = &total
-		pct := float64(transferred) * 100 / float64(total)
-		if pct > 100 {
-			pct = 100
-		}
-		update.Progress = &pct
+		update.BytesTransferred = strconv.FormatInt(transferred, 10)
+		update.BytesTotal = strconv.FormatInt(total, 10)
 	}
 	s.cfg.EventSink(update)
 }

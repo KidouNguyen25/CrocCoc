@@ -25,13 +25,12 @@ func TestUnavailableServiceDoesNotReportRealTransfer(t *testing.T) {
 }
 
 func TestUpdateWireShape(t *testing.T) {
-	zero := 0.0
 	cases := []struct {
 		update Update
 		want   string
 	}{
-		{Update{TransferID: "a", State: WaitingForPeer}, `{"transferID":"a","state":"WAITING_FOR_PEER"}`},
-		{Update{TransferID: "a", State: Transferring, Progress: &zero}, `{"transferID":"a","state":"TRANSFERRING","progress":0}`},
+		{Update{TransferID: "a", Revision: 2, State: WaitingForPeer}, `{"transferID":"a","revision":2,"state":"WAITING_FOR_PEER"}`},
+		{Update{TransferID: "a", Revision: 3, State: Transferring, BytesTransferred: "0", BytesTotal: "100"}, `{"transferID":"a","revision":3,"state":"TRANSFERRING","bytesTransferred":"0","bytesTotal":"100"}`},
 	}
 	for _, c := range cases {
 		data, err := json.Marshal(c.update)

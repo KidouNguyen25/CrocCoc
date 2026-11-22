@@ -21,6 +21,10 @@ func (unavailableEngineController) GetTransferSnapshot(string) (SessionSnapshot,
 	return SessionSnapshot{}, false
 }
 
+func (unavailableEngineController) GetTransferUpdate(string) (Update, bool) {
+	return Update{}, false
+}
+
 func (unavailableEngineController) GetSendCode(string) (string, bool) {
 	return "", false
 }

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func receiveServiceFixture(t *testing.T) (*engineService, string, *[]Update) {
@@ -197,7 +198,7 @@ func TestCancelTransferEmitsCancellingAndRecordProgressAdvancesRevision(t *testi
 		t.Fatalf("expected transferring + progress updates, got %d: %+v", len(*updates), *updates)
 	}
 	progressUpdate := (*updates)[1]
-	if progressUpdate.Revision <= (*updates)[0].Revision || progressUpdate.BytesTransferred == nil || *progressUpdate.BytesTransferred != 400 || progressUpdate.BytesTotal == nil || *progressUpdate.BytesTotal != 1000 {
+	if progressUpdate.Revision <= (*updates)[0].Revision || progressUpdate.BytesTransferred != "400" || progressUpdate.BytesTotal != "1000" {
 		t.Fatalf("unexpected progress update: %+v", progressUpdate)
 	}
 	okCancel, err := service.CancelTransfer(id)
@@ -207,6 +208,124 @@ func TestCancelTransferEmitsCancellingAndRecordProgressAdvancesRevision(t *testi
 	last := (*updates)[len(*updates)-1]
 	if last.State != Cancelling || last.ConnectionCode != "" {
 		t.Fatalf("expected immediate CANCELLING without code, got %+v", last)
+	}
+}
+
+func TestShutdownWaitsForActiveSessionBeforeReleasingWorkerPin(t *testing.T) {
+	workerPath := filepath.Join(t.TempDir(), "worker.exe")
+	contents := []byte("shutdown pin fixture")
+	if err := os.WriteFile(workerPath, contents, 0600); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(contents)
+	pin, err := pinWorkerExecutable(workerPath, hex.EncodeToString(digest[:]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &engineService{
+		workerPin:       pin,
+		shutdownTimeout: 2 * time.Second,
+		sessions:        make(map[string]*engineSession),
+		sendCode:        make(map[string]string),
+	}
+	started, err := service.coordinator.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiting, ok := service.coordinator.Advance(started.TransferID, WaitingForPeer)
+	if !ok {
+		t.Fatal("failed to enter waiting")
+	}
+	done := make(chan struct{})
+	cancelObserved := make(chan struct{})
+	service.sessions[waiting.TransferID] = &engineSession{
+		id:   waiting.TransferID,
+		done: done,
+		cancel: func() {
+			close(cancelObserved)
+			go func() {
+				time.Sleep(60 * time.Millisecond)
+				close(done)
+			}()
+		},
+	}
+
+	start := time.Now()
+	service.Shutdown()
+	elapsed := time.Since(start)
+	select {
+	case <-cancelObserved:
+	default:
+		t.Fatal("Shutdown did not cancel active session")
+	}
+	if elapsed < 50*time.Millisecond {
+		t.Fatalf("Shutdown returned before session finished cleanup: %v", elapsed)
+	}
+	if err := os.WriteFile(workerPath, []byte("unlocked"), 0600); err != nil {
+		t.Fatalf("worker pin remained locked after clean shutdown: %v", err)
+	}
+}
+
+func TestShutdownKeepsWorkerPinLockedWhenSessionTimesOut(t *testing.T) {
+	workerPath := filepath.Join(t.TempDir(), "worker.exe")
+	contents := []byte("stuck shutdown pin fixture")
+	if err := os.WriteFile(workerPath, contents, 0600); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(contents)
+	pin, err := pinWorkerExecutable(workerPath, hex.EncodeToString(digest[:]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pin.Close()
+
+	service := &engineService{
+		workerPin:       pin,
+		shutdownTimeout: 40 * time.Millisecond,
+		sessions:        make(map[string]*engineSession),
+		sendCode:        make(map[string]string),
+	}
+	started, err := service.coordinator.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiting, ok := service.coordinator.Advance(started.TransferID, WaitingForPeer)
+	if !ok {
+		t.Fatal("failed to enter waiting")
+	}
+	service.sessions[waiting.TransferID] = &engineSession{
+		id:     waiting.TransferID,
+		done:   make(chan struct{}), // never closes
+		cancel: func() {},
+	}
+	service.Shutdown()
+	if err := os.WriteFile(workerPath, []byte("should-stay-locked"), 0600); err == nil {
+		t.Fatal("worker pin was unlocked even though session did not finish")
+	}
+}
+
+func TestGetTransferUpdateExposesCodeOnlyWhileWaitingForPeer(t *testing.T) {
+	service := &engineService{
+		sessions: make(map[string]*engineSession),
+		sendCode: make(map[string]string),
+	}
+	started, err := service.coordinator.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiting, ok := service.coordinator.Advance(started.TransferID, WaitingForPeer)
+	if !ok {
+		t.Fatal("failed to enter waiting")
+	}
+	service.sendCode[waiting.TransferID] = "secret-code-xyz"
+	u, ok := service.GetTransferUpdate(waiting.TransferID)
+	if !ok || u.ConnectionCode != "secret-code-xyz" || u.State != WaitingForPeer {
+		t.Fatalf("expected code during WAITING_FOR_PEER, got %+v", u)
+	}
+	service.markSendTransferring(waiting.TransferID)
+	u2, ok := service.GetTransferUpdate(waiting.TransferID)
+	if !ok || u2.ConnectionCode != "" || u2.State != Transferring {
+		t.Fatalf("code must not appear outside WAITING_FOR_PEER, got %+v", u2)
 	}
 }
 

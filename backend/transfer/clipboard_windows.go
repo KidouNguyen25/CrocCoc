@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"runtime"
 	"strings"
+	"time"
 	"unicode/utf16"
 	"unsafe"
 
@@ -15,6 +16,9 @@ import (
 const (
 	cfUnicodeText            = 13
 	gmemMoveable             = 0x0002
+	hwndMessage              = ^uintptr(2) // HWND_MESSAGE = (HWND)-3
+	clipboardOpenRetries     = 5
+	clipboardOpenRetryDelay  = 10 * time.Millisecond
 	clipboardExcludeFormat   = "ExcludeClipboardContentFromMonitorProcessing"
 	clipboardNoHistoryFormat = "CanIncludeInClipboardHistory"
 	clipboardNoCloudFormat   = "CanUploadToCloudClipboard"
@@ -23,6 +27,8 @@ const (
 var (
 	user32DLL                 = windows.NewLazySystemDLL("user32.dll")
 	kernel32DLL               = windows.NewLazySystemDLL("kernel32.dll")
+	procCreateWindowExW       = user32DLL.NewProc("CreateWindowExW")
+	procDestroyWindow         = user32DLL.NewProc("DestroyWindow")
 	procRegisterClipboardFmtW = user32DLL.NewProc("RegisterClipboardFormatW")
 	procOpenClipboard         = user32DLL.NewProc("OpenClipboard")
 	procCloseClipboard        = user32DLL.NewProc("CloseClipboard")
@@ -35,12 +41,34 @@ var (
 	procRtlMoveMemory         = kernel32DLL.NewProc("RtlMoveMemory")
 )
 
+func createClipboardOwnerWindow() (uintptr, error) {
+	className, err := windows.UTF16PtrFromString("STATIC")
+	if err != nil {
+		return 0, ErrCopyUnsafe
+	}
+	hwnd, _, _ := procCreateWindowExW.Call(
+		0,
+		uintptr(unsafe.Pointer(className)),
+		0,
+		0,
+		0, 0, 0, 0,
+		hwndMessage,
+		0, 0, 0,
+	)
+	runtime.KeepAlive(className)
+	if hwnd == 0 {
+		return 0, ErrCopyUnsafe
+	}
+	return hwnd, nil
+}
+
 func registerClipboardFormat(name string) (uintptr, error) {
 	ptr, err := windows.UTF16PtrFromString(name)
 	if err != nil {
 		return 0, ErrCopyUnsafe
 	}
 	id, _, _ := procRegisterClipboardFmtW.Call(uintptr(unsafe.Pointer(ptr)))
+	runtime.KeepAlive(ptr)
 	if id == 0 {
 		return 0, ErrCopyUnsafe
 	}
@@ -65,9 +93,20 @@ func allocGlobalBytes(data []byte) (uintptr, error) {
 	return hMem, nil
 }
 
-// CopySecretToProtectedClipboard writes secret to the Windows clipboard only
-// after registering and setting Windows privacy markers in the same clipboard
-// open session. If any marker cannot be set, the secret is never written.
+func openClipboardWithRetry(hwnd uintptr) bool {
+	for i := 0; i < clipboardOpenRetries; i++ {
+		if opened, _, _ := procOpenClipboard.Call(hwnd); opened != 0 {
+			return true
+		}
+		time.Sleep(clipboardOpenRetryDelay)
+	}
+	return false
+}
+
+// CopySecretToProtectedClipboard writes secret to the Windows clipboard using
+// an owned message-only HWND, registering and setting Windows privacy markers
+// before CF_UNICODETEXT in the same open session. If any step fails before
+// setting the secret, it fails closed with ErrCopyUnsafe.
 func CopySecretToProtectedClipboard(secret string) error {
 	if secret == "" || strings.ContainsAny(secret, "\r\n\x00") {
 		return ErrCopyUnsafe
@@ -116,8 +155,20 @@ func CopySecretToProtectedClipboard(secret string) error {
 		return ErrCopyUnsafe
 	}
 
-	opened, _, _ := procOpenClipboard.Call(0)
-	if opened == 0 {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	hwnd, err := createClipboardOwnerWindow()
+	if err != nil {
+		procGlobalFree.Call(excludeMem)
+		procGlobalFree.Call(historyMem)
+		procGlobalFree.Call(cloudMem)
+		procGlobalFree.Call(textMem)
+		return ErrCopyUnsafe
+	}
+	defer procDestroyWindow.Call(hwnd)
+
+	if !openClipboardWithRetry(hwnd) {
 		procGlobalFree.Call(excludeMem)
 		procGlobalFree.Call(historyMem)
 		procGlobalFree.Call(cloudMem)
@@ -126,8 +177,7 @@ func CopySecretToProtectedClipboard(secret string) error {
 	}
 	defer procCloseClipboard.Call()
 
-	emptied, _, _ := procEmptyClipboard.Call()
-	if emptied == 0 {
+	if emptied, _, _ := procEmptyClipboard.Call(); emptied == 0 {
 		procGlobalFree.Call(excludeMem)
 		procGlobalFree.Call(historyMem)
 		procGlobalFree.Call(cloudMem)

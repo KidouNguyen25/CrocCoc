@@ -4,7 +4,7 @@ import "testing"
 
 func TestCanTransitionExhaustively(t *testing.T) {
 	states := []State{
-		Idle, Preparing, WaitingForPeer, AwaitingAcceptance,
+		State("IDLE"), Preparing, WaitingForPeer, AwaitingAcceptance,
 		Transferring, Finalizing, Cancelling, Completed, Failed, Cancelled, "UNKNOWN",
 	}
 	allowed := map[State]map[State]bool{

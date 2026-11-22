@@ -102,14 +102,14 @@ func TestWorkerClientPeerDeadlineStopsWorker(t *testing.T) {
 	t.Setenv(testWorkerModeEnv, "stalled")
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	cmd, stdin, stdout, stop, err := startWorker(ctx, os.Args[0])
+	cmd, job, stdin, stdout, stop, err := startWorker(ctx, os.Args[0])
 	if err != nil {
 		t.Fatal(err)
 	}
 	stopped := false
 	defer func() {
 		if !stopped {
-			_ = stopWorker(cmd, stop)
+			_ = stopWorker(cmd, job, stop)
 		}
 	}()
 	defer stdout.Close()
@@ -121,7 +121,7 @@ func TestWorkerClientPeerDeadlineStopsWorker(t *testing.T) {
 	if err := readWorkerFrameWithin(ctx, reader, &ready, time.Second, errWorkerFrameTimeout); err != nil || ready.Status != "waiting_for_peer" {
 		t.Fatalf("worker readiness frame: %+v, %v", ready, err)
 	}
-	_, err = readWorkerCompletion(ctx, cmd, stop, stdin, reader, 25*time.Millisecond, ErrPeerTimeout,
+	_, err = readWorkerCompletion(ctx, cmd, job, stop, stdin, reader, 25*time.Millisecond, ErrPeerTimeout,
 		PayloadIdleTimeout, nil, nil)
 	stopped = true
 	if !errors.Is(err, ErrPeerTimeout) {
@@ -133,14 +133,14 @@ func TestWorkerClientPayloadDeadlineStopsWorker(t *testing.T) {
 	t.Setenv(testWorkerModeEnv, "payload-stalled")
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	cmd, stdin, stdout, stop, err := startWorker(ctx, os.Args[0])
+	cmd, job, stdin, stdout, stop, err := startWorker(ctx, os.Args[0])
 	if err != nil {
 		t.Fatal(err)
 	}
 	stopped := false
 	defer func() {
 		if !stopped {
-			_ = stopWorker(cmd, stop)
+			_ = stopWorker(cmd, job, stop)
 		}
 	}()
 	defer stdout.Close()
@@ -152,7 +152,7 @@ func TestWorkerClientPayloadDeadlineStopsWorker(t *testing.T) {
 	if err := readWorkerFrameWithin(ctx, reader, &ready, time.Second, errWorkerFrameTimeout); err != nil || ready.Status != "waiting_for_peer" {
 		t.Fatalf("worker readiness frame: %+v, %v", ready, err)
 	}
-	_, err = readWorkerCompletion(ctx, cmd, stop, stdin, reader, 25*time.Millisecond, ErrPeerTimeout,
+	_, err = readWorkerCompletion(ctx, cmd, job, stop, stdin, reader, 25*time.Millisecond, ErrPeerTimeout,
 		25*time.Millisecond, nil, nil)
 	stopped = true
 	if !errors.Is(err, ErrPayloadTimeout) {

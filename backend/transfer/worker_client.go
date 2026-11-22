@@ -62,45 +62,67 @@ func NewWorkerClient(path string) *WorkerClient {
 	return &WorkerClient{path: strings.TrimSpace(path)}
 }
 
-func startWorker(ctx context.Context, path string) (*exec.Cmd, io.WriteCloser, io.ReadCloser, context.CancelFunc, error) {
+func startWorker(ctx context.Context, path string) (*exec.Cmd, *workerJob, io.WriteCloser, io.ReadCloser, context.CancelFunc, error) {
 	workerCtx, cancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(workerCtx, path)
 	cmd.WaitDelay = WorkerCleanupTimeout
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		cancel()
-		return nil, nil, nil, nil, ErrWorkerUnavailable
+		return nil, nil, nil, nil, nil, ErrWorkerUnavailable
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		_ = stdin.Close()
 		cancel()
-		return nil, nil, nil, nil, ErrWorkerUnavailable
+		return nil, nil, nil, nil, nil, ErrWorkerUnavailable
 	}
 	cmd.Stderr = io.Discard
 	if err := cmd.Start(); err != nil {
 		_ = stdin.Close()
 		_ = stdout.Close()
 		cancel()
-		return nil, nil, nil, nil, ErrWorkerUnavailable
+		return nil, nil, nil, nil, nil, ErrWorkerUnavailable
 	}
-	return cmd, stdin, stdout, cancel, nil
+	job, err := attachWorkerJob(cmd)
+	if err != nil {
+		cancel()
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+		_ = stdin.Close()
+		_ = stdout.Close()
+		return nil, nil, nil, nil, nil, ErrWorkerUnavailable
+	}
+	return cmd, job, stdin, stdout, cancel, nil
 }
 
-func stopWorker(cmd *exec.Cmd, cancel context.CancelFunc) error {
+func stopWorker(cmd *exec.Cmd, job *workerJob, cancel context.CancelFunc) error {
 	cancel()
+	if job != nil {
+		job.Terminate()
+	}
 	if cmd.Process != nil {
 		_ = cmd.Process.Kill()
 	}
-	return waitWorkerProcess(cmd, cancel)
+	err := waitWorkerProcess(cmd, job, cancel)
+	if job != nil {
+		job.Close()
+	}
+	return err
 }
 
-func waitWorker(cmd *exec.Cmd, stdin io.WriteCloser, cancel context.CancelFunc) error {
+func waitWorker(cmd *exec.Cmd, job *workerJob, stdin io.WriteCloser, cancel context.CancelFunc) error {
 	_ = stdin.Close()
-	return waitWorkerProcess(cmd, cancel)
+	err := waitWorkerProcess(cmd, job, cancel)
+	if job != nil {
+		job.Close()
+	}
+	return err
 }
 
-func waitWorkerProcess(cmd *exec.Cmd, cancel context.CancelFunc) error {
+func waitWorkerProcess(cmd *exec.Cmd, job *workerJob, cancel context.CancelFunc) error {
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 	timer := time.NewTimer(WorkerCleanupTimeout)
@@ -113,6 +135,9 @@ func waitWorkerProcess(cmd *exec.Cmd, cancel context.CancelFunc) error {
 		return nil
 	case <-timer.C:
 		cancel()
+		if job != nil {
+			job.Terminate()
+		}
 		if cmd.Process != nil {
 			_ = cmd.Process.Kill()
 		}
@@ -135,7 +160,7 @@ func readWorkerFrameWithin(ctx context.Context, reader *bufio.Reader, dst any, t
 	}
 }
 
-func readWorkerCompletion(ctx context.Context, cmd *exec.Cmd, cancel context.CancelFunc, stdin io.WriteCloser,
+func readWorkerCompletion(ctx context.Context, cmd *exec.Cmd, job *workerJob, cancel context.CancelFunc, stdin io.WriteCloser,
 	reader *bufio.Reader, firstTimeout time.Duration, firstTimeoutErr error, payloadTimeout time.Duration,
 	onTransferStarted func(), onProgress func(int64), secrets ...string) (workerManifestFrame, error) {
 	timeout := firstTimeout
@@ -143,7 +168,7 @@ func readWorkerCompletion(ctx context.Context, cmd *exec.Cmd, cancel context.Can
 	for {
 		var frame workerManifestFrame
 		if err := readWorkerFrameWithin(ctx, reader, &frame, timeout, errWorkerFrameTimeout, secrets...); err != nil {
-			if cleanupErr := stopWorker(cmd, cancel); cleanupErr != nil {
+			if cleanupErr := stopWorker(cmd, job, cancel); cleanupErr != nil {
 				return workerManifestFrame{}, cleanupErr
 			}
 			if ctx.Err() != nil {
@@ -155,7 +180,7 @@ func readWorkerCompletion(ctx context.Context, cmd *exec.Cmd, cancel context.Can
 			return workerManifestFrame{}, ErrWorkerProtocol
 		}
 		if frame.Version != workerWireVersion {
-			if cleanupErr := stopWorker(cmd, cancel); cleanupErr != nil {
+			if cleanupErr := stopWorker(cmd, job, cancel); cleanupErr != nil {
 				return workerManifestFrame{}, cleanupErr
 			}
 			return workerManifestFrame{}, ErrWorkerProtocol
@@ -163,7 +188,7 @@ func readWorkerCompletion(ctx context.Context, cmd *exec.Cmd, cancel context.Can
 		switch frame.Status {
 		case "progress":
 			if frame.ProgressBytes <= 0 {
-				if cleanupErr := stopWorker(cmd, cancel); cleanupErr != nil {
+				if cleanupErr := stopWorker(cmd, job, cancel); cleanupErr != nil {
 					return workerManifestFrame{}, cleanupErr
 				}
 				return workerManifestFrame{}, ErrWorkerProtocol
@@ -181,7 +206,7 @@ func readWorkerCompletion(ctx context.Context, cmd *exec.Cmd, cancel context.Can
 			timeout = payloadTimeout
 			timeoutErr = ErrPayloadTimeout
 		default:
-			if err := waitWorker(cmd, stdin, cancel); err != nil {
+			if err := waitWorker(cmd, job, stdin, cancel); err != nil {
 				return workerManifestFrame{}, err
 			}
 			if cmd.ProcessState == nil || cmd.ProcessState.ExitCode() != 0 {
@@ -268,14 +293,14 @@ func (w *WorkerClient) send(
 	if len(request)+1 > workerRequestLimit {
 		return ErrResourceLimit
 	}
-	cmd, stdin, stdout, cancel, err := startWorker(ctx, w.path)
+	cmd, job, stdin, stdout, cancel, err := startWorker(ctx, w.path)
 	if err != nil {
 		return err
 	}
 	defer cancel()
-	defer func() { _ = stdin.Close(); _ = stdout.Close() }()
+	defer func() { _ = stdin.Close(); _ = stdout.Close(); job.Close() }()
 	if _, err := stdin.Write(append(request, '\n')); err != nil {
-		if cleanupErr := stopWorker(cmd, cancel); cleanupErr != nil {
+		if cleanupErr := stopWorker(cmd, job, cancel); cleanupErr != nil {
 			return cleanupErr
 		}
 		return ErrWorkerProtocol
@@ -283,7 +308,7 @@ func (w *WorkerClient) send(
 	reader := bufio.NewReaderSize(stdout, 8192)
 	var ready workerManifestFrame
 	if err := readWorkerFrameWithin(ctx, reader, &ready, PreparationTimeout, errWorkerFrameTimeout, code, relayPassword); err != nil {
-		if cleanupErr := stopWorker(cmd, cancel); cleanupErr != nil {
+		if cleanupErr := stopWorker(cmd, job, cancel); cleanupErr != nil {
 			return cleanupErr
 		}
 		if ctx.Err() != nil {
@@ -295,7 +320,7 @@ func (w *WorkerClient) send(
 		return ErrWorkerProtocol
 	}
 	if ready.Version != workerWireVersion || ready.Status != "waiting_for_peer" {
-		if cleanupErr := stopWorker(cmd, cancel); cleanupErr != nil {
+		if cleanupErr := stopWorker(cmd, job, cancel); cleanupErr != nil {
 			return cleanupErr
 		}
 		if ready.Version != workerWireVersion {
@@ -303,7 +328,7 @@ func (w *WorkerClient) send(
 		}
 		return workerStatusError(ready.Status)
 	}
-	result, err := readWorkerCompletion(ctx, cmd, cancel, stdin, reader, PeerWaitTimeout, ErrPeerTimeout,
+	result, err := readWorkerCompletion(ctx, cmd, job, cancel, stdin, reader, PeerWaitTimeout, ErrPeerTimeout,
 		PayloadIdleTimeout, onTransferStarted, onProgress, code, relayPassword)
 	if err != nil {
 		return err
@@ -338,7 +363,7 @@ func (w *WorkerClient) receiveManifest(
 	if len(requestBytes)+1 > workerRequestLimit {
 		return ErrResourceLimit
 	}
-	cmd, stdin, stdout, cancel, err := startWorker(ctx, w.path)
+	cmd, job, stdin, stdout, cancel, err := startWorker(ctx, w.path)
 	if err != nil {
 		return err
 	}
@@ -346,12 +371,13 @@ func (w *WorkerClient) receiveManifest(
 	cleanup := func() {
 		_ = stdin.Close()
 		_ = stdout.Close()
+		job.Close()
 	}
 	defer cleanup()
 
 	encoder := json.NewEncoder(stdin)
 	if _, err := stdin.Write(append(requestBytes, '\n')); err != nil {
-		if cleanupErr := stopWorker(cmd, cancel); cleanupErr != nil {
+		if cleanupErr := stopWorker(cmd, job, cancel); cleanupErr != nil {
 			return cleanupErr
 		}
 		return ErrWorkerProtocol
@@ -360,7 +386,7 @@ func (w *WorkerClient) receiveManifest(
 	reader := bufio.NewReaderSize(stdout, 8192)
 	var ready workerManifestFrame
 	if err := readWorkerFrameWithin(ctx, reader, &ready, PreparationTimeout, errWorkerFrameTimeout, code, relayPassword); err != nil {
-		if cleanupErr := stopWorker(cmd, cancel); cleanupErr != nil {
+		if cleanupErr := stopWorker(cmd, job, cancel); cleanupErr != nil {
 			return cleanupErr
 		}
 		if ctx.Err() != nil {
@@ -372,7 +398,7 @@ func (w *WorkerClient) receiveManifest(
 		return ErrWorkerProtocol
 	}
 	if ready.Version != workerWireVersion || ready.Status != "waiting_for_peer" {
-		if cleanupErr := stopWorker(cmd, cancel); cleanupErr != nil {
+		if cleanupErr := stopWorker(cmd, job, cancel); cleanupErr != nil {
 			return cleanupErr
 		}
 		if ready.Version != workerWireVersion {
@@ -382,7 +408,7 @@ func (w *WorkerClient) receiveManifest(
 	}
 	var offerFrame workerManifestFrame
 	if err := readWorkerFrameWithin(ctx, reader, &offerFrame, PeerWaitTimeout, errWorkerFrameTimeout, code, relayPassword); err != nil {
-		if cleanupErr := stopWorker(cmd, cancel); cleanupErr != nil {
+		if cleanupErr := stopWorker(cmd, job, cancel); cleanupErr != nil {
 			return cleanupErr
 		}
 		if ctx.Err() != nil {
@@ -394,7 +420,7 @@ func (w *WorkerClient) receiveManifest(
 		return ErrWorkerProtocol
 	}
 	if offerFrame.Version != workerWireVersion || offerFrame.Status != "awaiting_decision" || offerFrame.OfferID == "" {
-		if cleanupErr := stopWorker(cmd, cancel); cleanupErr != nil {
+		if cleanupErr := stopWorker(cmd, job, cancel); cleanupErr != nil {
 			return cleanupErr
 		}
 		if offerFrame.Version != workerWireVersion {
@@ -404,7 +430,7 @@ func (w *WorkerClient) receiveManifest(
 	}
 	offer, err := PrepareReceiveOffer(offerFrame.Entries, nowUTC())
 	if err != nil {
-		if cleanupErr := stopWorker(cmd, cancel); cleanupErr != nil {
+		if cleanupErr := stopWorker(cmd, job, cancel); cleanupErr != nil {
 			return cleanupErr
 		}
 		return err
@@ -424,12 +450,12 @@ func (w *WorkerClient) receiveManifest(
 	if err := encoder.Encode(workerDecisionFrame{
 		Version: workerWireVersion, OfferID: offer.OfferID, Accept: &accept, PayloadDir: payloadDir,
 	}); err != nil {
-		if cleanupErr := stopWorker(cmd, cancel); cleanupErr != nil {
+		if cleanupErr := stopWorker(cmd, job, cancel); cleanupErr != nil {
 			return cleanupErr
 		}
 		return ErrWorkerProtocol
 	}
-	result, err := readWorkerCompletion(ctx, cmd, cancel, stdin, reader, PayloadIdleTimeout, ErrPayloadTimeout,
+	result, err := readWorkerCompletion(ctx, cmd, job, cancel, stdin, reader, PayloadIdleTimeout, ErrPayloadTimeout,
 		PayloadIdleTimeout, nil, onProgress, code, relayPassword)
 	if err != nil {
 		return err

@@ -24,7 +24,6 @@ var ErrCopyUnsafe = errors.New("COPY_UNSAFE: không thể sao chép mã an toàn
 type State string
 
 const (
-	Idle               State = "IDLE"
 	Preparing          State = "PREPARING"
 	WaitingForPeer     State = "WAITING_FOR_PEER"
 	AwaitingAcceptance State = "AWAITING_ACCEPTANCE"
@@ -39,7 +38,6 @@ const (
 type CrocInfo struct {
 	Available bool   `json:"available"`
 	Version   string `json:"version,omitempty"`
-	Path      string `json:"path,omitempty"`
 	Message   string `json:"message,omitempty"`
 }
 
@@ -50,13 +48,11 @@ type TransferError struct {
 
 type Update struct {
 	TransferID       string         `json:"transferID"`
-	Revision         uint64         `json:"revision,omitempty"`
+	Revision         uint64         `json:"revision"`
 	State            State          `json:"state"`
 	CurrentFile      string         `json:"currentFile,omitempty"`
-	BytesTransferred *int64         `json:"bytesTransferred,omitempty"`
-	BytesTotal       *int64         `json:"bytesTotal,omitempty"`
-	BytesPerSecond   *int64         `json:"bytesPerSecond,omitempty"`
-	Progress         *float64       `json:"progress,omitempty"`
+	BytesTransferred string         `json:"bytesTransferred,omitempty"`
+	BytesTotal       string         `json:"bytesTotal,omitempty"`
 	Message          string         `json:"message,omitempty"`
 	ConnectionCode   string         `json:"connectionCode,omitempty"`
 	ReceiveOffer     *ReceiveOffer  `json:"receiveOffer,omitempty"`
