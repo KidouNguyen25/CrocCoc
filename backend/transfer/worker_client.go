@@ -12,7 +12,10 @@ import (
 	"time"
 )
 
-const workerWireVersion = 2
+const (
+	workerWireVersion  = 2
+	workerRequestLimit = 8192 // keep equal to requestLimit in the worker
+)
 
 var (
 	ErrWorkerUnavailable    = errors.New("ENGINE_UNAVAILABLE: không thể khởi chạy engine")
@@ -237,17 +240,25 @@ func (w *WorkerClient) send(
 		strings.ContainsAny(relayPassword, "\r\n\x00") {
 		return ErrWorkerProtocol
 	}
+	request, err := json.Marshal(workerStartRequest{
+		Version: workerWireVersion, Mode: "send", Code: code,
+		RelayAddress: relayAddress, RelayPassword: relayPassword,
+		ManifestDigest: manifestDigest, Paths: append([]string(nil), paths...),
+	})
+	if err != nil {
+		return ErrWorkerProtocol
+	}
+	// The worker rejects larger start frames; fail before launching it.
+	if len(request)+1 > workerRequestLimit {
+		return ErrResourceLimit
+	}
 	cmd, stdin, stdout, cancel, err := startWorker(ctx, w.path)
 	if err != nil {
 		return err
 	}
 	defer cancel()
 	defer func() { _ = stdin.Close(); _ = stdout.Close() }()
-	if err := json.NewEncoder(stdin).Encode(workerStartRequest{
-		Version: workerWireVersion, Mode: "send", Code: code,
-		RelayAddress: relayAddress, RelayPassword: relayPassword,
-		ManifestDigest: manifestDigest, Paths: append([]string(nil), paths...),
-	}); err != nil {
+	if _, err := stdin.Write(append(request, '\n')); err != nil {
 		if cleanupErr := stopWorker(cmd, cancel); cleanupErr != nil {
 			return cleanupErr
 		}
@@ -456,10 +467,11 @@ func readWorkerFrame(reader *bufio.Reader, dst any, secrets ...string) error {
 	if err != nil || len(frame) > 8192 || bytes.IndexByte(frame, 0) >= 0 {
 		return ErrWorkerProtocol
 	}
-	for _, secret := range secrets {
-		if secret != "" && bytes.Contains(frame, []byte(secret)) {
-			return ErrWorkerProtocol
-		}
+	// Match secrets against string values only, so a short secret cannot
+	// collide with JSON keys or numbers such as "version":2.
+	var generic any
+	if json.Unmarshal(frame, &generic) != nil || jsonValuesContain(generic, secrets) {
+		return ErrWorkerProtocol
 	}
 	decoder := json.NewDecoder(bytes.NewReader(frame))
 	decoder.DisallowUnknownFields()
@@ -470,6 +482,30 @@ func readWorkerFrame(reader *bufio.Reader, dst any, secrets ...string) error {
 		return ErrWorkerProtocol
 	}
 	return nil
+}
+
+func jsonValuesContain(value any, secrets []string) bool {
+	switch v := value.(type) {
+	case string:
+		for _, secret := range secrets {
+			if secret != "" && strings.Contains(v, secret) {
+				return true
+			}
+		}
+	case []any:
+		for _, item := range v {
+			if jsonValuesContain(item, secrets) {
+				return true
+			}
+		}
+	case map[string]any:
+		for _, item := range v {
+			if jsonValuesContain(item, secrets) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func nowUTC() time.Time {

@@ -164,12 +164,17 @@ func prepareReceiveStageAt(lease *DestinationLease, entries []ManifestEntry, jou
 		allowed[strings.ToUpper(entry.Path)] = entry
 	}
 	journalCommitted := false
+	journalCreated := false
 	stage := &ReceiveStage{allowed: allowed, completed: make(map[string]DirectoryIdentity), destinationPath: lease.path, manifestDigest: fingerprintManifest(entries)}
 	defer func() {
 		if err != nil {
 			_ = stage.Close()
 			if !journalCommitted && stage.journalLockPath != "" {
 				_ = os.Remove(stage.journalLockPath)
+			}
+			// A partial journal would fail recovery and block every launch.
+			if !journalCommitted && journalCreated {
+				_ = os.Remove(stage.journalPath)
 			}
 		}
 	}()
@@ -226,6 +231,7 @@ func prepareReceiveStageAt(lease *DestinationLease, entries []ManifestEntry, jou
 	if err != nil {
 		return nil, ErrUnsafeStorage
 	}
+	journalCreated = true
 	data, err := json.Marshal(stage.ownership)
 	if err != nil {
 		_ = journal.Close()

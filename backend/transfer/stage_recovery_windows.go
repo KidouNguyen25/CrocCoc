@@ -64,6 +64,11 @@ func recoverOwnedReceiveStage(journalPath string) error {
 	}
 	lease, err := OpenReceiveDestinationLease(ownership.DestinationPath)
 	if err != nil {
+		// A destination that no longer exists took its stage with it; keeping
+		// the journal would block every future launch.
+		if _, statErr := os.Lstat(ownership.DestinationPath); errors.Is(statErr, os.ErrNotExist) {
+			return finishStageRecovery(journalPath, lockPath, &lock)
+		}
 		return ErrRecoveryPending
 	}
 	if lease.Identity() != ownership.Destination {
@@ -99,15 +104,29 @@ func recoverOwnedReceiveStage(journalPath string) error {
 	markerValid := readErr == nil && int(count) == len(ownership.MarkerNonce) &&
 		bytes.Equal(markerBytes[:count], []byte(ownership.MarkerNonce))
 	markerCloseErr := windows.CloseHandle(marker)
+	if !markerValid || markerCloseErr != nil {
+		_ = windows.CloseHandle(stage)
+		_ = lease.Close()
+		return ErrRecoveryPending
+	}
+	// The verified stage handle stays open without delete sharing, so the
+	// directory cannot be renamed or replaced while its children are removed.
+	children, readErr := os.ReadDir(stagePath)
+	removeErr := readErr
+	for i := 0; removeErr == nil && i < len(children); i++ {
+		removeErr = os.RemoveAll(filepath.Join(stagePath, children[i].Name()))
+	}
 	stageCloseErr := windows.CloseHandle(stage)
-	if !markerValid || markerCloseErr != nil || stageCloseErr != nil {
+	if removeErr != nil || stageCloseErr != nil {
+		_ = lease.Close()
+		return ErrRecoveryPending
+	}
+	// Remove only deletes an empty directory, so a replacement is never emptied.
+	if err := os.Remove(stagePath); err != nil {
 		_ = lease.Close()
 		return ErrRecoveryPending
 	}
 	if err := lease.Close(); err != nil {
-		return ErrRecoveryPending
-	}
-	if err := os.RemoveAll(stagePath); err != nil {
 		return ErrRecoveryPending
 	}
 	return finishStageRecovery(journalPath, lockPath, &lock)

@@ -68,6 +68,32 @@ func TestWorkerClientSendConsumesProgressFrames(t *testing.T) {
 	}
 }
 
+func TestWorkerClientSendAcceptsShortSecretsThatMatchJSONKeys(t *testing.T) {
+	t.Setenv(testWorkerModeEnv, "success")
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	for _, password := range []string{"2", "status", "version"} {
+		err := NewWorkerClient(os.Args[0]).send(ctx, "private-code", "relay.example.test:9009", password,
+			[]string{"source.txt"}, strings.Repeat("a", 64), nil)
+		if err != nil {
+			t.Fatalf("password %q rejected: %v", password, err)
+		}
+	}
+}
+
+func TestWorkerClientSendRejectsRequestOverWorkerLimit(t *testing.T) {
+	t.Setenv(testWorkerModeEnv, "success")
+	paths := make([]string, 100)
+	for i := range paths {
+		paths[i] = `C:\` + strings.Repeat("d", 100)
+	}
+	err := NewWorkerClient(os.Args[0]).send(t.Context(), "private-code", "relay.example.test:9009",
+		"private-password", paths, strings.Repeat("a", 64), nil)
+	if !errors.Is(err, ErrResourceLimit) {
+		t.Fatalf("oversized request = %v, want ErrResourceLimit", err)
+	}
+}
+
 func TestWorkerClientPeerDeadlineStopsWorker(t *testing.T) {
 	t.Setenv(testWorkerModeEnv, "stalled")
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)

@@ -176,3 +176,33 @@ func TestRecoveryDoesNotRemoveStageWithLiveLease(t *testing.T) {
 		t.Fatalf("stale stage recovery failed: %v", err)
 	}
 }
+
+func TestRecoveryDropsJournalWhenDestinationIsGone(t *testing.T) {
+	root := t.TempDir()
+	destination := filepath.Join(root, "destination")
+	journalDir := filepath.Join(root, "journal")
+	if err := os.Mkdir(destination, 0700); err != nil {
+		t.Fatal(err)
+	}
+	entries := []ManifestEntry{{Path: "a.txt", SizeBytes: 4}}
+	lease, err := PreflightReceiveDestination(destination, entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage, err := prepareReceiveStageAt(lease, entries, journalDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journalPath := stage.JournalPath()
+	_ = stage.Close()
+	_ = lease.Close()
+	if err := os.RemoveAll(destination); err != nil {
+		t.Fatal(err)
+	}
+	if err := recoverOwnedReceiveStagesAt(journalDir); err != nil {
+		t.Fatalf("missing destination blocks recovery: %v", err)
+	}
+	if _, err := os.Stat(journalPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("journal was kept: %v", err)
+	}
+}

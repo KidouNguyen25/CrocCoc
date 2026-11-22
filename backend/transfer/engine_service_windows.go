@@ -249,16 +249,12 @@ func (s *engineService) runReceive(ctx context.Context, session *engineSession, 
 	s.mu.Unlock()
 	if err == nil && stage != nil && pending != nil {
 		if adoptErr := stage.AdoptEnginePayload(); adoptErr != nil {
-			_ = stage.Close()
-			_ = pending.Close()
-			s.finishReceiveSession(session.id, adoptErr, false, true)
+			s.finishReceiveSession(session.id, adoptErr, false, !recoverClosedStage(stage, pending))
 			return
 		}
 		final, result, finalErr := FinalizeNativeReceive(&s.coordinator, session.id, pending.lease, stage, pending.entries)
 		if finalErr != nil {
-			_ = stage.Close()
-			_ = pending.Close()
-			s.finishReceiveSession(session.id, finalErr, result.Partial, true)
+			s.finishReceiveSession(session.id, finalErr, result.Partial, !recoverClosedStage(stage, pending))
 		} else {
 			s.emit(final, "", "")
 			_ = result
@@ -285,6 +281,14 @@ func (s *engineService) runReceive(ctx context.Context, session *engineSession, 
 		err = ErrWorkerProtocol
 	}
 	s.finishReceiveSession(session.id, err, false, cleanupPending)
+}
+
+// recoverClosedStage closes the stage and offer handles, then removes the
+// owned stage through verified recovery. False means cleanup is still pending.
+func recoverClosedStage(stage *ReceiveStage, pending *nativeReceiveOffer) bool {
+	stageClosed := stage.Close() == nil
+	pendingClosed := pending.Close() == nil
+	return stageClosed && pendingClosed && recoverOwnedReceiveStage(stage.JournalPath()) == nil
 }
 
 func offerToManifest(offer ReceiveOffer) []ManifestEntry {
@@ -318,7 +322,12 @@ func (s *engineService) DecideReceive(id, offerID string, accept bool) (bool, er
 	if _, ok := s.coordinator.DecideReceive(id, offerID, accept, time.Now()); !ok {
 		return false, nil
 	}
-	session.decision <- receiveDecision{accept: accept}
+	// The buffer holds one decision; if a cancel already filled it, the
+	// session is ending and a blocking send would never return.
+	select {
+	case session.decision <- receiveDecision{accept: accept}:
+	default:
+	}
 	return true, nil
 }
 
@@ -372,7 +381,7 @@ func (s *engineService) failSession(id string, cause error) {
 			return
 		}
 		if snapshot, advanced := s.coordinator.Advance(id, Cancelled); advanced {
-			s.emit(snapshot, cause.Error(), "")
+			s.emit(snapshot, cancelMessage(cause), "")
 		}
 		return
 	}
@@ -384,8 +393,16 @@ func (s *engineService) failSession(id string, cause error) {
 		return
 	}
 	if snapshot, ok := s.coordinator.Advance(id, Cancelled); ok {
-		s.emit(snapshot, cause.Error(), "")
+		s.emit(snapshot, cancelMessage(cause), "")
 	}
+}
+
+// cancelMessage hides Go's raw "context canceled" text from the UI.
+func cancelMessage(cause error) string {
+	if errors.Is(cause, context.Canceled) {
+		return ""
+	}
+	return cause.Error()
 }
 
 func (s *engineService) finishReceiveSession(id string, cause error, partialOutput, cleanupPending bool) {
