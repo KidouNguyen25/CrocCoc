@@ -1,4 +1,8 @@
 export const TRANSFER_UPDATE = 'transfer:update'
+export const MAX_SNAPSHOT_RETRIES = 3
+export const SNAPSHOT_POLL_INTERVAL_MS = 5000
+export const SNAPSHOT_LOST_TRACKING_MESSAGE =
+  'Mất theo dõi trạng thái phiên truyền sau nhiều lần đồng bộ snapshot thất bại.'
 
 export type TransferState =
   | 'IDLE'
@@ -97,6 +101,11 @@ export interface TransferSessionTracker {
   onEvent(event: TransferUpdate): TransferUpdate | undefined
   resolveStart(transferID: string): { update: TransferUpdate; hadBuffered: boolean }
   reconcileSnapshot(transferID: string, snapshot: TransferUpdate | null): TransferUpdate | undefined
+  recordSnapshotFailure(
+    transferID: string,
+    maxRetries?: number,
+  ): { failureCount: number; trackingLost: boolean }
+  snapshotFailures(): number
   failStart(): void
   reset(): void
   current(): TransferUpdate | undefined
@@ -106,6 +115,7 @@ export function createTransferSessionTracker(): TransferSessionTracker {
   let activeID: string | undefined
   let awaitingStart = false
   let latest: TransferUpdate | undefined
+  let failureCount = 0
   const earlyByID = new Map<string, TransferUpdate>()
 
   return {
@@ -113,6 +123,7 @@ export function createTransferSessionTracker(): TransferSessionTracker {
       awaitingStart = true
       activeID = undefined
       latest = undefined
+      failureCount = 0
       earlyByID.clear()
     },
     onEvent(event) {
@@ -125,6 +136,7 @@ export function createTransferSessionTracker(): TransferSessionTracker {
         return undefined
       }
       if (event.transferID !== activeID) return undefined
+      failureCount = 0
       const accepted = acceptTransferUpdate(latest, event)
       latest = accepted
       return accepted
@@ -132,6 +144,7 @@ export function createTransferSessionTracker(): TransferSessionTracker {
     resolveStart(transferID) {
       activeID = transferID
       awaitingStart = false
+      failureCount = 0
       const buffered = earlyByID.get(transferID)
       earlyByID.clear()
       const initial = preserveStartedTransferUpdate(undefined, transferID)
@@ -142,24 +155,79 @@ export function createTransferSessionTracker(): TransferSessionTracker {
       if (!snapshot || activeID !== transferID || snapshot.transferID !== transferID) {
         return undefined
       }
+      failureCount = 0
       const accepted = acceptTransferUpdate(latest, snapshot)
       latest = accepted
       return accepted
     },
+    recordSnapshotFailure(transferID, maxRetries = MAX_SNAPSHOT_RETRIES) {
+      if (activeID !== transferID || !latest || !isRunning(latest.state)) {
+        return { failureCount: 0, trackingLost: false }
+      }
+      failureCount += 1
+      return {
+        failureCount,
+        trackingLost: failureCount >= maxRetries,
+      }
+    },
+    snapshotFailures() {
+      return failureCount
+    },
     failStart() {
       awaitingStart = false
+      failureCount = 0
       earlyByID.clear()
     },
     reset() {
       activeID = undefined
       awaitingStart = false
       latest = undefined
+      failureCount = 0
       earlyByID.clear()
     },
     current() {
       return latest
     },
   }
+}
+
+export async function syncTransferSnapshot(
+  tracker: TransferSessionTracker,
+  client: Pick<TransferClient, 'getTransferSnapshot'>,
+  transferID: string,
+  maxRetries: number = MAX_SNAPSHOT_RETRIES,
+): Promise<{ update?: TransferUpdate; trackingLost: boolean; failureCount: number }> {
+  if (!client.getTransferSnapshot) {
+    return { update: tracker.current(), trackingLost: false, failureCount: 0 }
+  }
+  const before = tracker.current()
+  if (before && before.transferID === transferID && !isRunning(before.state)) {
+    return { update: before, trackingLost: false, failureCount: 0 }
+  }
+
+  let snapshot: TransferUpdate | null = null
+  let callFailed = false
+  try {
+    snapshot = await client.getTransferSnapshot(transferID)
+  } catch {
+    callFailed = true
+  }
+
+  const after = tracker.current()
+  if (!after || after.transferID !== transferID) {
+    return { update: undefined, trackingLost: false, failureCount: 0 }
+  }
+  if (!isRunning(after.state)) {
+    return { update: after, trackingLost: false, failureCount: 0 }
+  }
+
+  if (!callFailed && snapshot && snapshot.transferID === transferID) {
+    const reconciled = tracker.reconcileSnapshot(transferID, snapshot)
+    return { update: reconciled, trackingLost: false, failureCount: 0 }
+  }
+
+  const { failureCount, trackingLost } = tracker.recordSnapshotFailure(transferID, maxRetries)
+  return { update: tracker.current(), trackingLost, failureCount }
 }
 
 export function isRunning(state: TransferState): boolean {

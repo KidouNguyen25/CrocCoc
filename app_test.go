@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"slices"
 	"testing"
@@ -132,5 +133,68 @@ func TestAppControllerBindingsReturnPointersAndFailClosedOnUnknownCopy(t *testin
 	app.shutdown()
 	if !controller.shutdownRan {
 		t.Fatal("shutdown did not delegate to controller")
+	}
+}
+
+func TestBeforeClosePromptsDuringTransferringAndFinalizing(t *testing.T) {
+	controller := &fakeControllerService{
+		update: &transfer.Update{
+			TransferID: "send-id",
+			Revision:   3,
+			State:      transfer.Transferring,
+		},
+	}
+	app := newApp(controller)
+	if _, err := app.StartSend([]string{"report.pdf"}); err != nil {
+		t.Fatalf("unexpected start send error: %v", err)
+	}
+
+	var promptedState transfer.State
+	app.confirmClose = func(_ context.Context, state transfer.State) bool {
+		promptedState = state
+		return false
+	}
+	if !app.beforeClose(context.Background()) {
+		t.Fatal("expected beforeClose to return true (prevent close) when user declines")
+	}
+	if promptedState != transfer.Transferring {
+		t.Fatalf("expected prompt for TRANSFERRING, got %q", promptedState)
+	}
+	if controller.shutdownRan {
+		t.Fatal("shutdown should not run when close is cancelled")
+	}
+
+	// Finalizing also prompts; accepting triggers shutdown and allows close.
+	controller.update.State = transfer.Finalizing
+	app.confirmClose = func(_ context.Context, state transfer.State) bool {
+		promptedState = state
+		return true
+	}
+	if app.beforeClose(context.Background()) {
+		t.Fatal("expected beforeClose to return false (allow close) when user confirms")
+	}
+	if promptedState != transfer.Finalizing {
+		t.Fatalf("expected prompt for FINALIZING, got %q", promptedState)
+	}
+	if !controller.shutdownRan {
+		t.Fatal("expected shutdown to run when user confirms close")
+	}
+
+	// Non-transferring states close immediately without prompting.
+	controller.shutdownRan = false
+	controller.update.State = transfer.WaitingForPeer
+	promptCalled := false
+	app.confirmClose = func(context.Context, transfer.State) bool {
+		promptCalled = true
+		return false
+	}
+	if app.beforeClose(context.Background()) {
+		t.Fatal("expected immediate close in WAITING_FOR_PEER")
+	}
+	if promptCalled {
+		t.Fatal("should not prompt when state is WAITING_FOR_PEER")
+	}
+	if !controller.shutdownRan {
+		t.Fatal("expected shutdown to run on non-prompted close")
 	}
 }

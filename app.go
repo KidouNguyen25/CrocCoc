@@ -11,9 +11,11 @@ import (
 
 // App translates Wails binding calls into application-service calls.
 type App struct {
-	transfers transfer.Service
-	mu        sync.RWMutex
-	ctx       context.Context
+	transfers      transfer.Service
+	mu             sync.RWMutex
+	ctx            context.Context
+	lastTransferID string
+	confirmClose   func(ctx context.Context, state transfer.State) bool
 }
 
 func newApp(transfers transfer.Service) *App {
@@ -25,11 +27,19 @@ func (a *App) GetCrocInfo() transfer.CrocInfo {
 }
 
 func (a *App) StartSend(paths []string) (string, error) {
-	return a.transfers.StartSend(paths)
+	id, err := a.transfers.StartSend(paths)
+	if err == nil && id != "" {
+		a.setLastTransferID(id)
+	}
+	return id, err
 }
 
 func (a *App) StartReceive(code, outputDir string) (string, error) {
-	return a.transfers.StartReceive(code, outputDir)
+	id, err := a.transfers.StartReceive(code, outputDir)
+	if err == nil && id != "" {
+		a.setLastTransferID(id)
+	}
+	return id, err
 }
 
 func (a *App) CancelTransfer(transferID string) (bool, error) {
@@ -123,6 +133,61 @@ func (a *App) focusWindow() {
 	wailsruntime.WindowShow(ctx)
 }
 
+func (a *App) setLastTransferID(transferID string) {
+	a.mu.Lock()
+	a.lastTransferID = transferID
+	a.mu.Unlock()
+}
+
+func (a *App) getLastTransferID() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.lastTransferID
+}
+
+// beforeClose prompts for confirmation when a session is actively transferring
+// or finalizing payload data. Returning true prevents window closure.
+func (a *App) beforeClose(ctx context.Context) bool {
+	if lastID := a.getLastTransferID(); lastID != "" {
+		if snap := a.GetTransferSnapshot(lastID); snap != nil &&
+			(snap.State == transfer.Transferring || snap.State == transfer.Finalizing) {
+			if !a.confirmActiveClose(ctx, snap.State) {
+				return true
+			}
+		}
+	}
+	a.shutdown()
+	return false
+}
+
+func (a *App) confirmActiveClose(ctx context.Context, state transfer.State) bool {
+	a.mu.RLock()
+	confirm := a.confirmClose
+	runtimeCtx := a.ctx
+	a.mu.RUnlock()
+	if ctx == nil {
+		ctx = runtimeCtx
+	}
+	if confirm != nil {
+		return confirm(ctx, state)
+	}
+	if ctx == nil {
+		return true
+	}
+	choice, err := wailsruntime.MessageDialog(ctx, wailsruntime.MessageDialogOptions{
+		Type:          wailsruntime.QuestionDialog,
+		Title:         "Xác nhận đóng CrocCoc",
+		Message:       "Phiên truyền tệp đang xử lý dữ liệu. Bạn có muốn hủy phiên và thoát ứng dụng không?",
+		Buttons:       []string{"Yes", "No"},
+		DefaultButton: "No",
+		CancelButton:  "No",
+	})
+	if err != nil {
+		return false
+	}
+	return choice == "Yes" || choice == "OK"
+}
+
 func (a *App) shutdown() {
 	if controller, ok := a.transfers.(transfer.EngineController); ok {
 		controller.Shutdown()
@@ -130,6 +195,9 @@ func (a *App) shutdown() {
 }
 
 func (a *App) emitTransferUpdate(update transfer.Update) {
+	if update.TransferID != "" {
+		a.setLastTransferID(update.TransferID)
+	}
 	a.mu.RLock()
 	ctx := a.ctx
 	a.mu.RUnlock()

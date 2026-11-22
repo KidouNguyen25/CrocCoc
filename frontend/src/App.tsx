@@ -1,7 +1,14 @@
 import { useEffect, useState, useRef, useMemo } from 'react'
 import { getDesktopClient } from './adapters/wailsTransfer.ts'
 import { createMockTransferClient } from './mockTransfer.ts'
-import { createTransferSessionTracker, isRunning } from './transfer.ts'
+import {
+  createTransferSessionTracker,
+  isRunning,
+  syncTransferSnapshot,
+  MAX_SNAPSHOT_RETRIES,
+  SNAPSHOT_POLL_INTERVAL_MS,
+  SNAPSHOT_LOST_TRACKING_MESSAGE,
+} from './transfer.ts'
 import type { CrocInfo, TransferClient, TransferUpdate } from './transfer.ts'
 import { Header } from './components/Header.tsx'
 import { ModeSwitcher } from './components/ModeSwitcher.tsx'
@@ -28,6 +35,7 @@ export function App() {
   const applyTrackedUpdate = (next: TransferUpdate | undefined) => {
     if (!next) return
     setUpdate(next)
+    setAppError((prev) => (prev === SNAPSHOT_LOST_TRACKING_MESSAGE ? '' : prev))
     if (next.connectionCode) {
       setConnectionCode(next.connectionCode)
     } else if (next.state !== 'WAITING_FOR_PEER' && next.state !== 'PREPARING') {
@@ -74,6 +82,83 @@ export function App() {
 
   const state = update?.state ?? 'IDLE'
   const busy = pending || isRunning(state)
+  const activeTransferID = update?.transferID
+  const activeRunning = Boolean(activeTransferID && isRunning(state))
+
+  const pollSnapshot = async (transferID: string) => {
+    if (!clientRef.current.getTransferSnapshot) return
+    const result = await syncTransferSnapshot(
+      trackerRef.current,
+      clientRef.current,
+      transferID,
+      MAX_SNAPSHOT_RETRIES,
+    )
+    if (result.update) {
+      applyTrackedUpdate(result.update)
+    }
+    if (result.trackingLost) {
+      setAppError(SNAPSHOT_LOST_TRACKING_MESSAGE)
+    }
+  }
+
+  useEffect(() => {
+    if (!activeTransferID || !activeRunning || !clientRef.current.getTransferSnapshot) {
+      return
+    }
+    let cancelled = false
+    let inFlight = false
+    let timer: ReturnType<typeof setInterval> | undefined
+
+    const runSync = async () => {
+      if (cancelled || inFlight) return
+      if (trackerRef.current.snapshotFailures() >= MAX_SNAPSHOT_RETRIES) return
+      inFlight = true
+      try {
+        const result = await syncTransferSnapshot(
+          trackerRef.current,
+          clientRef.current,
+          activeTransferID,
+          MAX_SNAPSHOT_RETRIES,
+        )
+        if (cancelled) return
+        if (result.update) {
+          applyTrackedUpdate(result.update)
+        }
+        if (result.trackingLost) {
+          setAppError(SNAPSHOT_LOST_TRACKING_MESSAGE)
+          if (timer !== undefined) {
+            clearInterval(timer)
+            timer = undefined
+          }
+        }
+      } finally {
+        inFlight = false
+      }
+    }
+
+    const handleFocusOrVisible = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        return
+      }
+      void runSync()
+    }
+
+    timer = setInterval(() => {
+      void runSync()
+    }, SNAPSHOT_POLL_INTERVAL_MS)
+
+    window.addEventListener('focus', handleFocusOrVisible)
+    document.addEventListener('visibilitychange', handleFocusOrVisible)
+
+    return () => {
+      cancelled = true
+      if (timer !== undefined) {
+        clearInterval(timer)
+      }
+      window.removeEventListener('focus', handleFocusOrVisible)
+      document.removeEventListener('visibilitychange', handleFocusOrVisible)
+    }
+  }, [activeTransferID, activeRunning])
 
   const beginTransfer = async (request: () => Promise<string>, fallbackError: string) => {
     // Buffer events by ID before Start* resolves and never let a previous
@@ -85,13 +170,9 @@ export function App() {
     setUpdate(undefined)
     try {
       const transferID = await request()
-      const { update: started, hadBuffered } = trackerRef.current.resolveStart(transferID)
+      const { update: started } = trackerRef.current.resolveStart(transferID)
       applyTrackedUpdate(started)
-      if (!hadBuffered && clientRef.current.getTransferSnapshot) {
-        void clientRef.current.getTransferSnapshot(transferID).then((snapshot) => {
-          applyTrackedUpdate(trackerRef.current.reconcileSnapshot(transferID, snapshot))
-        }).catch(() => {})
-      }
+      void pollSnapshot(transferID)
     } catch (err) {
       trackerRef.current.failStart()
       setAppError(err instanceof Error ? err.message : fallbackError)

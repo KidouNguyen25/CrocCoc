@@ -40,9 +40,8 @@ func main() {
 		OnStartup: func(ctx context.Context) {
 			app.setRuntimeContext(ctx)
 		},
-		OnBeforeClose: func(context.Context) bool {
-			app.shutdown()
-			return false
+		OnBeforeClose: func(ctx context.Context) bool {
+			return app.beforeClose(ctx)
 		},
 		OnShutdown: func(context.Context) {
 			app.shutdown()

@@ -143,3 +143,76 @@ test('second consecutive session preserves early WAITING_FOR_PEER and reconciles
   assert.equal(computeProgressPercent('0', '0'), undefined)
   assert.equal(computeProgressPercent('150', '100'), undefined)
 })
+
+test('syncTransferSnapshot recovers missed FAILED terminal error and enforces bounded retries', async () => {
+  const {
+    createTransferSessionTracker,
+    syncTransferSnapshot,
+    MAX_SNAPSHOT_RETRIES,
+  } = await import('./transfer.ts')
+
+  const tracker = createTransferSessionTracker()
+  tracker.beginStart()
+  // Early WAITING_FOR_PEER event was buffered before Start* resolved.
+  tracker.onEvent({
+    transferID: 'recv-42',
+    revision: 2,
+    state: 'WAITING_FOR_PEER',
+  })
+  const started = tracker.resolveStart('recv-42')
+  assert.equal(started.hadBuffered, true)
+  assert.equal(started.update.state, 'WAITING_FOR_PEER')
+
+  // Simulate two transient snapshot failures followed by recovery on retry #2.
+  let attempts = 0
+  const flakyClient = {
+    getTransferSnapshot: async () => {
+      attempts += 1
+      if (attempts === 1) throw new Error('IPC timeout')
+      if (attempts === 2) return null
+      return {
+        transferID: 'recv-42',
+        revision: 4,
+        state: 'FAILED',
+        error: {
+          code: 'PEER_TIMEOUT',
+          message: 'peer không phản hồi trong thời hạn',
+        },
+      }
+    },
+  }
+
+  const fail1 = await syncTransferSnapshot(tracker, flakyClient, 'recv-42', MAX_SNAPSHOT_RETRIES)
+  assert.equal(fail1.failureCount, 1)
+  assert.equal(fail1.trackingLost, false)
+
+  const fail2 = await syncTransferSnapshot(tracker, flakyClient, 'recv-42', MAX_SNAPSHOT_RETRIES)
+  assert.equal(fail2.failureCount, 2)
+  assert.equal(fail2.trackingLost, false)
+
+  // Third call succeeds and recovers the missed FAILED state with its structured error.
+  const recovered = await syncTransferSnapshot(tracker, flakyClient, 'recv-42', MAX_SNAPSHOT_RETRIES)
+  assert.equal(recovered.failureCount, 0)
+  assert.equal(recovered.trackingLost, false)
+  assert.equal(recovered.update?.state, 'FAILED')
+  assert.deepEqual(recovered.update?.error, {
+    code: 'PEER_TIMEOUT',
+    message: 'peer không phản hồi trong thời hạn',
+  })
+
+  // Next session experiences 3 consecutive snapshot failures -> reports trackingLost = true.
+  tracker.beginStart()
+  tracker.resolveStart('send-99')
+  const deadClient = {
+    getTransferSnapshot: async () => null,
+  }
+  const r1 = await syncTransferSnapshot(tracker, deadClient, 'send-99', MAX_SNAPSHOT_RETRIES)
+  assert.equal(r1.trackingLost, false)
+  assert.equal(r1.failureCount, 1)
+  const r2 = await syncTransferSnapshot(tracker, deadClient, 'send-99', MAX_SNAPSHOT_RETRIES)
+  assert.equal(r2.trackingLost, false)
+  assert.equal(r2.failureCount, 2)
+  const r3 = await syncTransferSnapshot(tracker, deadClient, 'send-99', MAX_SNAPSHOT_RETRIES)
+  assert.equal(r3.trackingLost, true)
+  assert.equal(r3.failureCount, 3)
+})
