@@ -4,6 +4,8 @@
 
 ## Kiểm và đóng gói
 
+Chạy `scripts/build-release.ps1` bằng PowerShell trên Windows x64. Cần sẵn `govulncheck`, Go, Node/npm, Git và Wails CLI đúng phiên bản `github.com/wailsapp/wails/v2` ghi trong `go.mod`. Script dừng nếu `go vet`, `govulncheck` hoặc `npm audit --audit-level=high` thất bại (trừ `-SkipTests` chỉ dành cho ứng viên thử nghiệm, được đánh dấu rõ trong manifest). Script tạo `sbom-go.cdx.json` từ module build-info của cả EXE và worker thực tế, và `sbom-frontend.cdx.json` từ `npm sbom`. Hai SBOM đều thuộc `SHA256SUMS.txt`; `release/` là output ignored, không làm bẩn Git. Đội QA cần xem cả cảnh báo audit dưới ngưỡng chặn, kiểm license/provenance worker và ký trước khi phân phối.
+
 1. Chốt Git SHA và version theo [CMP](configuration-management.md). Ghi phiên bản thực tế của Go, Node/npm và Wails CLI theo lockfile và pin. Nếu chọn helper, dùng toolchain tương thích `go.mod` của engine đã duyệt.
 2. Chạy `npm --prefix frontend ci`, `npm --prefix frontend test`, `npm --prefix frontend run build`, rồi `go test ./...`, `go vet ./...` và `govulncheck ./...`. Kiểm cả helper module nếu có. Chạy `npm --prefix frontend audit`, ghi rủi ro, cách xử lý hoặc lý do chấp thuận. Không tuyên bố đã thiết lập CI nếu mới lưu quy trình.
 3. Chạy `wails doctor`, sau đó `wails build -platform windows/amd64`. Wails có thể build lại frontend, vì vậy kiểm gói cuối, không suy từ hash của bundle độc lập. Đưa engine đã xác minh, giấy phép, SBOM (CycloneDX hoặc SPDX) và hướng dẫn vào gói. Không include fixture/log hoặc bí mật.

@@ -27,6 +27,8 @@ export function App() {
   const [connectionCode, setConnectionCode] = useState('')
   const [pending, setPending] = useState(false)
   const [trackingLost, setTrackingLost] = useState(false)
+  const [trackingError, setTrackingError] = useState('')
+  const [forceResetAvailable, setForceResetAvailable] = useState(false)
   const [pollRecoveryToken, setPollRecoveryToken] = useState(0)
   const [appError, setAppError] = useState('')
 
@@ -40,6 +42,8 @@ export function App() {
     if (!next) return
     setUpdate(next)
     setTrackingLost(false)
+    setTrackingError('')
+    setForceResetAvailable(false)
     setAppError((prev) => (prev === SNAPSHOT_LOST_TRACKING_MESSAGE ? '' : prev))
     if (next.connectionCode) {
       setConnectionCode(next.connectionCode)
@@ -95,6 +99,7 @@ export function App() {
   const busy = !canToggleMockMode(pending, state)
   const activeTransferID = update?.transferID
   const activeRunning = Boolean(activeTransferID && isRunning(state))
+  const displayedError = trackingError || appError
 
   const probeSnapshot = async (
     transferID: string,
@@ -114,7 +119,7 @@ export function App() {
       )
       if (result.trackingLost) {
         setTrackingLost(true)
-        setAppError(SNAPSHOT_LOST_TRACKING_MESSAGE)
+        setTrackingError(SNAPSHOT_LOST_TRACKING_MESSAGE)
         return true
       }
       if (result.update && result.failureCount === 0) {
@@ -179,6 +184,8 @@ export function App() {
     snapshotInFlightRef.current = false
     setPending(true)
     setTrackingLost(false)
+    setTrackingError('')
+    setForceResetAvailable(false)
     setAppError('')
     setConnectionCode('')
     setUpdate(undefined)
@@ -238,13 +245,49 @@ export function App() {
     }
   }
 
-  const handleReset = () => {
+  const handleCancelLostTransfer = async () => {
+    if (!activeTransferID) return
+    const transferID = activeTransferID
+    let cancelIssue = ''
+    try {
+      const requested = await clientRef.current.cancelTransfer(transferID)
+      if (!requested) {
+        cancelIssue = 'Backend không chấp nhận yêu cầu hủy (phiên đã kết thúc, đang công bố hoặc không còn trong RAM).'
+      }
+    } catch (err) {
+      cancelIssue = err instanceof Error ? err.message : 'Không thể gửi yêu cầu hủy phiên.'
+    }
+    // Recover the actual native state before ever offering a UI-only reset.
+    // An accepted cancellation is asynchronous and is not a terminal update.
+    await probeSnapshot(transferID, true)
+    const current = trackerRef.current.current()
+    const stillLost = current?.transferID === transferID &&
+      isRunning(current.state) &&
+      trackerRef.current.snapshotFailures() >= MAX_SNAPSHOT_RETRIES
+    if (cancelIssue && stillLost) {
+      setTrackingError(cancelIssue)
+      setForceResetAvailable(true)
+    } else if (cancelIssue && current?.transferID === transferID && isRunning(current.state)) {
+      // A healthy subsequent snapshot or native event clears this transient notice.
+      setTrackingError(cancelIssue)
+    }
+  }
+
+  const handleReset = (force = false) => {
+    if (activeRunning && !(force && trackingLost && forceResetAvailable)) {
+      setAppError('Phiên truyền vẫn có thể đang chạy. Hãy hủy phiên và chờ xác nhận trước khi đặt lại.')
+      return
+    }
     trackerRef.current.reset()
     snapshotInFlightRef.current = false
     setTrackingLost(false)
+    setTrackingError('')
+    setForceResetAvailable(false)
     setUpdate(undefined)
     setConnectionCode('')
-    setAppError('')
+    setAppError(force
+      ? 'Chỉ đặt lại giao diện, chưa xác nhận backend đã dừng. Phiên mới có thể bị từ chối BUSY; hãy kiểm tra lại engine trước khi thử.'
+      : '')
   }
 
   const handleModeChange = (newMode: 'send' | 'receive') => {
@@ -270,10 +313,10 @@ export function App() {
         <ModeSwitcher mode={mode} onModeChange={handleModeChange} disabled={busy} />
 
         <div className="panel-body">
-          {appError && (
+          {displayedError && (
             <div className="error-alert top-alert" role="alert">
               <span className="error-icon">⚠</span>
-              <span>{appError}</span>
+              <span>{displayedError}</span>
               {trackingLost && activeTransferID ? (
                 <div className="alert-actions">
                   <button
@@ -288,16 +331,28 @@ export function App() {
                   <button
                     type="button"
                     className="btn-secondary btn-alert-action"
-                    onClick={handleReset}
+                    onClick={() => void handleCancelLostTransfer()}
                   >
-                    Đặt lại màn hình
+                    Yêu cầu hủy phiên
                   </button>
+                  {forceResetAvailable && (
+                    <>
+                      <button
+                        type="button"
+                        className="btn-secondary btn-alert-action"
+                        onClick={() => handleReset(true)}
+                      >
+                        Buộc đặt lại giao diện
+                      </button>
+                      <span>Chỉ đặt lại màn hình; backend có thể vẫn đang truyền và từ chối phiên mới (BUSY).</span>
+                    </>
+                  )}
                 </div>
               ) : (
                 <button
                   type="button"
                   className="btn-close-alert"
-                  onClick={() => setAppError('')}
+                  onClick={() => { setAppError(''); setTrackingError('') }}
                   aria-label="Đóng thông báo lỗi"
                 >
                   ✕

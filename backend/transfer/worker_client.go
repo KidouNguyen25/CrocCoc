@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -56,15 +57,31 @@ type workerDecisionFrame struct {
 // helper path is supplied by the host; credentials never enter argv or env.
 type WorkerClient struct {
 	path string
+	// Only test fixtures supply extra environment variables; production leaves this empty.
+	testEnv []string
 }
 
 func NewWorkerClient(path string) *WorkerClient {
 	return &WorkerClient{path: strings.TrimSpace(path)}
 }
 
-func startWorker(ctx context.Context, path string) (*exec.Cmd, *workerJob, io.WriteCloser, io.ReadCloser, context.CancelFunc, error) {
+func workerEnvironment() []string {
+	// The worker must not inherit credentials, proxies or personal Croc config.
+	// Only OS paths required for Windows startup and temporary files are passed.
+	keys := []string{"SystemRoot", "WINDIR", "TEMP", "TMP", "TMPDIR"}
+	env := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if value, ok := os.LookupEnv(key); ok && value != "" {
+			env = append(env, key+"="+value)
+		}
+	}
+	return env
+}
+
+func startWorker(ctx context.Context, path string, testEnv ...string) (*exec.Cmd, *workerJob, io.WriteCloser, io.ReadCloser, context.CancelFunc, error) {
 	workerCtx, cancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(workerCtx, path)
+	cmd.Env = append(workerEnvironment(), testEnv...)
 	cmd.WaitDelay = WorkerCleanupTimeout
 	if err := prepareWorkerCommand(cmd); err != nil {
 		cancel()
@@ -297,7 +314,7 @@ func (w *WorkerClient) send(
 	if len(request)+1 > workerRequestLimit {
 		return ErrResourceLimit
 	}
-	cmd, job, stdin, stdout, cancel, err := startWorker(ctx, w.path)
+	cmd, job, stdin, stdout, cancel, err := startWorker(ctx, w.path, w.testEnv...)
 	if err != nil {
 		return err
 	}
@@ -367,7 +384,7 @@ func (w *WorkerClient) receiveManifest(
 	if len(requestBytes)+1 > workerRequestLimit {
 		return ErrResourceLimit
 	}
-	cmd, job, stdin, stdout, cancel, err := startWorker(ctx, w.path)
+	cmd, job, stdin, stdout, cancel, err := startWorker(ctx, w.path, w.testEnv...)
 	if err != nil {
 		return err
 	}

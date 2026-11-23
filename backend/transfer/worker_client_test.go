@@ -27,6 +27,9 @@ func runTestWorker(mode string) {
 		os.Exit(2)
 	}
 	encoder := json.NewEncoder(os.Stdout)
+	if mode == "check-env" && (os.Getenv("CROCCOC_SECRET_LEAK") != "" || os.Getenv("HTTPS_PROXY") != "") {
+		os.Exit(9)
+	}
 	if mode == "stalled" {
 		if encoder.Encode(workerManifestFrame{Version: workerWireVersion, Status: "waiting_for_peer"}) != nil {
 			os.Exit(3)
@@ -56,7 +59,7 @@ func TestWorkerClientSendConsumesProgressFrames(t *testing.T) {
 	t.Setenv(testWorkerModeEnv, "success")
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	worker := NewWorkerClient(os.Args[0])
+	worker := &WorkerClient{path: os.Args[0], testEnv: []string{testWorkerModeEnv + "=success"}}
 	transferStarted := false
 	var progressBytes int64
 	err := worker.send(ctx, "private-code", "relay.example.test:9009", "private-password",
@@ -77,7 +80,7 @@ func TestWorkerClientSendAcceptsShortSecretsThatMatchJSONKeys(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	for _, password := range []string{"2", "status", "version"} {
-		err := NewWorkerClient(os.Args[0]).send(ctx, "private-code", "relay.example.test:9009", password,
+		err := (&WorkerClient{path: os.Args[0], testEnv: []string{testWorkerModeEnv + "=success"}}).send(ctx, "private-code", "relay.example.test:9009", password,
 			[]string{"source.txt"}, strings.Repeat("a", 64), nil, nil)
 		if err != nil {
 			t.Fatalf("password %q rejected: %v", password, err)
@@ -102,7 +105,7 @@ func TestWorkerClientPeerDeadlineStopsWorker(t *testing.T) {
 	t.Setenv(testWorkerModeEnv, "stalled")
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	cmd, job, stdin, stdout, stop, err := startWorker(ctx, os.Args[0])
+	cmd, job, stdin, stdout, stop, err := startWorker(ctx, os.Args[0], testWorkerModeEnv+"="+os.Getenv(testWorkerModeEnv))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +136,7 @@ func TestWorkerClientPayloadDeadlineStopsWorker(t *testing.T) {
 	t.Setenv(testWorkerModeEnv, "payload-stalled")
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	cmd, job, stdin, stdout, stop, err := startWorker(ctx, os.Args[0])
+	cmd, job, stdin, stdout, stop, err := startWorker(ctx, os.Args[0], testWorkerModeEnv+"="+os.Getenv(testWorkerModeEnv))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,6 +160,25 @@ func TestWorkerClientPayloadDeadlineStopsWorker(t *testing.T) {
 	stopped = true
 	if !errors.Is(err, ErrPayloadTimeout) {
 		t.Fatalf("payload idle timeout was not enforced: %v", err)
+	}
+}
+
+func TestWorkerEnvironmentDoesNotInheritHostCredentialsOrProxy(t *testing.T) {
+	t.Setenv("CROCCOC_SECRET_LEAK", "must-not-reach-worker")
+	t.Setenv("HTTPS_PROXY", "http://proxy.example.test")
+	t.Setenv(testWorkerModeEnv, "check-env")
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	worker := &WorkerClient{path: os.Args[0], testEnv: []string{testWorkerModeEnv + "=check-env"}}
+	if err := worker.send(ctx, "private-code", "relay.example.test:9009",
+		"private-password", []string{"source.txt"}, strings.Repeat("a", 64), nil, nil); err != nil {
+		t.Fatalf("isolated worker environment rejected or inherited secrets: %v", err)
+	}
+	for _, variable := range workerEnvironment() {
+		if strings.HasPrefix(variable, "CROCCOC_SECRET_LEAK=") ||
+			strings.HasPrefix(variable, "HTTPS_PROXY=") {
+			t.Fatalf("worker environment includes sensitive host variable")
+		}
 	}
 }
 

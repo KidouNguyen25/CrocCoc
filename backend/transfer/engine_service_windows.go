@@ -46,9 +46,12 @@ type engineService struct {
 	coordinator     Coordinator
 	shutdownTimeout time.Duration
 
-	mu       sync.Mutex
-	sessions map[string]*engineSession
-	sendCode map[string]string
+	mu                    sync.Mutex
+	sessions              map[string]*engineSession
+	sendCode              map[string]string
+	lastProgressID        string
+	lastBytesTransferred  int64
+	lastBytesTotal        int64
 }
 
 // NewEngineService creates the Windows backend. It reports unavailable until
@@ -172,6 +175,15 @@ func (s *engineService) runSend(ctx context.Context, session *engineSession, cod
 		}
 		if completed, ok := s.coordinator.Advance(id, Completed); ok {
 			s.emit(completed, "", "")
+		}
+		// Cancellation may win between any two transitions above even when the
+		// worker has already returned success. Never strand the coordinator in
+		// CANCELLING (and accidentally drop its session without releasing BUSY).
+		if cancelled, ok := s.coordinator.Advance(id, Cancelled); ok {
+			s.emit(cancelled, "", "")
+		}
+		if current, ok := s.coordinator.Snapshot(id); ok && !IsTerminal(current.State) {
+			s.failSession(id, ErrWorkerProtocol)
 		}
 	} else {
 		s.failSession(id, err)
@@ -414,14 +426,8 @@ func (s *engineService) GetTransferUpdate(id string) (Update, bool) {
 		if offer, found := s.coordinator.GetReceiveOffer(id); found {
 			update.ReceiveOffer = &offer
 		}
-	case Transferring:
-		s.mu.Lock()
-		session := s.sessions[id]
-		if session != nil && session.bytesTotal > 0 {
-			update.BytesTransferred = strconv.FormatInt(session.bytesTransferred, 10)
-			update.BytesTotal = strconv.FormatInt(session.bytesTotal, 10)
-		}
-		s.mu.Unlock()
+	case Transferring, Finalizing, Completed:
+		update.BytesTransferred, update.BytesTotal = s.progressFields(id)
 	}
 	return update, true
 }
@@ -487,6 +493,17 @@ func (s *engineService) Shutdown() {
 		}
 	}
 
+	// A worker cleanup timeout can close session.done without proving that
+	// the worker process has exited. Preserve its executable pin until process
+	// exit rather than treating a closed goroutine channel as OS cleanup proof.
+	if allDone {
+		for _, id := range ids {
+			if snapshot, found := s.coordinator.Snapshot(id); found && snapshot.CleanupPending {
+				allDone = false
+				break
+			}
+		}
+	}
 	// Only release the pinned worker lease after all active sessions have
 	// conclusively ended; otherwise keep it locked until OS process exit.
 	if allDone {
@@ -629,14 +646,35 @@ func (s *engineService) finishReceiveSession(id string, cause error, partialOutp
 	}
 }
 
-func (s *engineService) releaseSession(id string) {
-	if snapshot, ok := s.coordinator.Snapshot(id); ok && IsTerminal(snapshot.State) {
-		if snapshot.CleanupPending {
-			return
-		}
-		_ = s.coordinator.Release(id)
-	}
+// progressFields keeps completed transfer metrics readable from a terminal
+// snapshot even after engineSession has been released from memory.
+func (s *engineService) progressFields(id string) (string, string) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	if session := s.sessions[id]; session != nil && session.bytesTotal > 0 {
+		return strconv.FormatInt(session.bytesTransferred, 10), strconv.FormatInt(session.bytesTotal, 10)
+	}
+	if s.lastProgressID == id && s.lastBytesTotal > 0 {
+		return strconv.FormatInt(s.lastBytesTransferred, 10), strconv.FormatInt(s.lastBytesTotal, 10)
+	}
+	return "", ""
+}
+
+func (s *engineService) releaseSession(id string) {
+	snapshot, ok := s.coordinator.Snapshot(id)
+	if !ok || !IsTerminal(snapshot.State) || snapshot.CleanupPending {
+		// Never discard the cancellation handle for a live session, or free
+		// owned state while cleanup is still pending. A receive finalizer may
+		// already have released the terminal snapshot before reaching here.
+		return
+	}
+	_ = s.coordinator.Release(id)
+	s.mu.Lock()
+	if session := s.sessions[id]; session != nil {
+		s.lastProgressID = id
+		s.lastBytesTransferred = session.bytesTransferred
+		s.lastBytesTotal = session.bytesTotal
+	}
 	delete(s.sessions, id)
 	delete(s.sendCode, id)
 	s.mu.Unlock()
@@ -646,9 +684,13 @@ func (s *engineService) emit(snapshot SessionSnapshot, message, code string) {
 	if s.cfg.EventSink == nil {
 		return
 	}
-	s.cfg.EventSink(Update{TransferID: snapshot.TransferID, State: snapshot.State,
+	update := Update{TransferID: snapshot.TransferID, State: snapshot.State,
 		Revision: snapshot.Revision, Message: message, ConnectionCode: code,
-		PartialOutput: snapshot.PartialOutput, CleanupPending: snapshot.CleanupPending})
+		PartialOutput: snapshot.PartialOutput, CleanupPending: snapshot.CleanupPending}
+	if snapshot.State == Transferring || snapshot.State == Finalizing || snapshot.State == Completed {
+		update.BytesTransferred, update.BytesTotal = s.progressFields(snapshot.TransferID)
+	}
+	s.cfg.EventSink(update)
 }
 
 func (s *engineService) emitOffer(snapshot SessionSnapshot, offer ReceiveOffer) {

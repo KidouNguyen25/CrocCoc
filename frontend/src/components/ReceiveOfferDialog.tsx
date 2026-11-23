@@ -12,6 +12,13 @@ export function ReceiveOfferDialog({ offer, onDecide, disabled = false }: Receiv
   const { fileCount, totalBytes, items, expiresAt } = offer
   const dialogRef = useRef<HTMLDivElement>(null)
   const previouslyFocused = useRef<HTMLElement | null>(null)
+  const disabledRef = useRef(disabled)
+  const onDecideRef = useRef(onDecide)
+
+  useEffect(() => {
+    disabledRef.current = disabled
+    onDecideRef.current = onDecide
+  }, [disabled, onDecide])
 
   useEffect(() => {
     // Save previously focused element
@@ -19,14 +26,14 @@ export function ReceiveOfferDialog({ offer, onDecide, disabled = false }: Receiv
 
     // Focus trap
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !disabled) {
+      if (e.key === 'Escape' && !disabledRef.current) {
         e.preventDefault()
-        onDecide(false)
+        onDecideRef.current(false)
         return
       }
       if (e.key === 'Tab') {
         const focusableElements = dialogRef.current?.querySelectorAll<HTMLElement>(
-          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+          'button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])'
         )
         const firstElement = focusableElements?.[0] as HTMLElement | undefined
         const lastElement = focusableElements?.[focusableElements.length - 1] as HTMLElement | undefined
@@ -46,14 +53,15 @@ export function ReceiveOfferDialog({ offer, onDecide, disabled = false }: Receiv
     // Focus first focusable element (Accept button)
     const focusTarget = dialogRef.current?.querySelector<HTMLElement>('button[autoFocus]') ||
       dialogRef.current?.querySelector<HTMLElement>('.btn-accept')
-    setTimeout(() => focusTarget?.focus(), 0)
+    const focusTimer = setTimeout(() => focusTarget?.focus(), 0)
 
     return () => {
+      clearTimeout(focusTimer)
       document.removeEventListener('keydown', handleKeyDown)
       // Restore focus to previously focused element
       previouslyFocused.current?.focus()
     }
-  }, [disabled])
+  }, [])
 
   const expiryLabel = expiresAt
     ? new Date(expiresAt).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })

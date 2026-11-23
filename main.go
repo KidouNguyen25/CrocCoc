@@ -5,6 +5,7 @@ import (
 	"embed"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"croccoc/backend/transfer"
@@ -52,8 +53,26 @@ func main() {
 	}
 }
 
+// resolveWorkerPath only uses an explicit override or the verified bundled path
+// alongside the application binary. It never searches PATH or the working dir.
+func resolveWorkerPath() string {
+	if override := strings.TrimSpace(os.Getenv("CROCCOC_WORKER_PATH")); override != "" {
+		return override
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	path := filepath.Join(filepath.Dir(executable), "bin", "croccoc-engine.exe")
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	return path
+}
+
 func engineServiceConfig(eventSink func(transfer.Update)) transfer.EngineServiceConfig {
-	workerPath := strings.TrimSpace(os.Getenv("CROCCOC_WORKER_PATH"))
+	workerPath := resolveWorkerPath()
 	relayAddress := strings.TrimSpace(os.Getenv("CROCCOC_RELAY_ADDRESS"))
 	relayPassword := os.Getenv("CROCCOC_RELAY_PASSWORD")
 	_ = os.Unsetenv("CROCCOC_RELAY_PASSWORD")

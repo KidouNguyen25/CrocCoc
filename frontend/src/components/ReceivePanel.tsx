@@ -31,7 +31,9 @@ export function ReceivePanel({
   const [folderCopied, setFolderCopied] = useState(false)
 
   useEffect(() => {
-    if (!isMock) setOutputDir((dir) => (dir === 'Downloads' ? '' : dir))
+    // Desktop paths are not valid mock defaults and vice versa. Reset the
+    // directory when changing engine modes, never reuse a native path in mock.
+    setOutputDir((dir) => isMock ? 'Downloads' : (dir === 'Downloads' ? '' : dir))
   }, [isMock])
 
   const state = update?.state ?? 'IDLE'

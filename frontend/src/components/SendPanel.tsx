@@ -4,6 +4,28 @@ import { FileList } from './FileList.tsx'
 import type { SelectedFileItem } from './FileList.tsx'
 import { TransferProgress } from './TransferProgress.tsx'
 
+function sourceRootName(path: string): string {
+  const trimmed = path.replace(/[/\\]+$/, '')
+  return trimmed.split(/[/\\]/).pop() || trimmed
+}
+
+// The receiver publishes root names into one directory. Two distinct sources
+// with the same basename would collide there even if their full paths differ.
+function appendDistinctRoots(existing: SelectedFileItem[], incoming: SelectedFileItem[]): SelectedFileItem[] {
+  const paths = new Set(existing.map((item) => item.path.replace(/[/\\]+$/, '').replace(/\//g, '\\').toLowerCase()))
+  const roots = new Set(existing.map((item) => item.name.trim().toLowerCase()))
+  const merged = [...existing]
+  for (const item of incoming) {
+    const path = item.path.replace(/[/\\]+$/, '').replace(/\//g, '\\').toLowerCase()
+    const root = item.name.trim().toLowerCase()
+    if (!path || !root || paths.has(path) || roots.has(root)) continue
+    paths.add(path)
+    roots.add(root)
+    merged.push(item)
+  }
+  return merged
+}
+
 interface SendPanelProps {
   update?: TransferUpdate
   connectionCode?: string
@@ -46,7 +68,7 @@ export function SendPanel({
       size: file.size,
       isDirectory: false,
     }))
-    setItems((prev) => [...prev, ...newItems])
+    setItems((prev) => appendDistinctRoots(prev, newItems))
     setErrorMsg('')
     e.target.value = ''
   }
@@ -68,7 +90,7 @@ export function SendPanel({
       size: totalSize,
       isDirectory: true,
     }
-    setItems((prev) => [...prev, newFolderItem])
+    setItems((prev) => appendDistinctRoots(prev, [newFolderItem]))
     setErrorMsg('')
     e.target.value = ''
   }
@@ -76,17 +98,14 @@ export function SendPanel({
   const handleAddManualPath = () => {
     const trimmed = manualPath.trim()
     if (!trimmed) return
-    const name = trimmed.split(/[/\\]/).pop() || trimmed
-    setItems((prev) => [
-      ...prev,
-      {
-        id: `${trimmed}-${Date.now()}`,
-        name,
-        path: trimmed,
-        size: undefined,
-        isDirectory: false,
-      },
-    ])
+    const name = sourceRootName(trimmed)
+    setItems((prev) => appendDistinctRoots(prev, [{
+      id: `${trimmed}-${Date.now()}`,
+      name,
+      path: trimmed,
+      size: undefined,
+      isDirectory: false,
+    }]))
     setManualPath('')
     setErrorMsg('')
   }
@@ -96,21 +115,12 @@ export function SendPanel({
     try {
       const paths = await onSelectPaths(kind)
       if (paths.length === 0) return // user cancelled picker
-      setItems((existing) => {
-        const selected = new Set(existing.map((item) => item.path.toLowerCase()))
-        const additions: SelectedFileItem[] = []
-        for (const path of paths) {
-          if (!path || selected.has(path.toLowerCase())) continue
-          selected.add(path.toLowerCase())
-          additions.push({
-            id: `${path}-${Date.now()}-${additions.length}`,
-            path,
-            name: path.split(/[/\\]/).pop() || path,
-            isDirectory: kind === 'sendDirectory',
-          })
-        }
-        return [...existing, ...additions]
-      })
+      setItems((existing) => appendDistinctRoots(existing, paths.filter(Boolean).map((path, index) => ({
+        id: `${path}-${Date.now()}-${index}`,
+        path,
+        name: sourceRootName(path),
+        isDirectory: kind === 'sendDirectory',
+      }))))
       setErrorMsg('')
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Không thể chọn đường dẫn.')
@@ -141,7 +151,7 @@ export function SendPanel({
         size: f.size,
         isDirectory: false,
       }))
-      setItems((prev) => [...prev, ...dropped])
+      setItems((prev) => appendDistinctRoots(prev, dropped))
       setErrorMsg('')
     }
   }
