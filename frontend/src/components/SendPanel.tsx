@@ -59,6 +59,15 @@ export function SendPanel({
 
   const state = update?.state ?? 'IDLE'
 
+  const addItems = (incoming: SelectedFileItem[]) => {
+    // Keep the merge functional to preserve concurrent native picker updates.
+    const preview = appendDistinctRoots(items, incoming)
+    setErrorMsg(preview.length < items.length + incoming.length
+      ? 'Đã bỏ qua mục có đường dẫn hoặc tên gốc trùng với mục đã chọn.'
+      : '')
+    setItems((prev) => appendDistinctRoots(prev, incoming))
+  }
+
   const handleFilesAdded = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files || e.target.files.length === 0) return
     const newItems: SelectedFileItem[] = Array.from(e.target.files).map((file) => ({
@@ -68,8 +77,7 @@ export function SendPanel({
       size: file.size,
       isDirectory: false,
     }))
-    setItems((prev) => appendDistinctRoots(prev, newItems))
-    setErrorMsg('')
+    addItems(newItems)
     e.target.value = ''
   }
 
@@ -90,8 +98,7 @@ export function SendPanel({
       size: totalSize,
       isDirectory: true,
     }
-    setItems((prev) => appendDistinctRoots(prev, [newFolderItem]))
-    setErrorMsg('')
+    addItems([newFolderItem])
     e.target.value = ''
   }
 
@@ -99,15 +106,14 @@ export function SendPanel({
     const trimmed = manualPath.trim()
     if (!trimmed) return
     const name = sourceRootName(trimmed)
-    setItems((prev) => appendDistinctRoots(prev, [{
+    addItems([{
       id: `${trimmed}-${Date.now()}`,
       name,
       path: trimmed,
       size: undefined,
       isDirectory: false,
-    }]))
+    }])
     setManualPath('')
-    setErrorMsg('')
   }
 
   const handleNativeSelect = async (kind: 'sendFiles' | 'sendDirectory') => {
@@ -115,13 +121,12 @@ export function SendPanel({
     try {
       const paths = await onSelectPaths(kind)
       if (paths.length === 0) return // user cancelled picker
-      setItems((existing) => appendDistinctRoots(existing, paths.filter(Boolean).map((path, index) => ({
+      addItems(paths.filter(Boolean).map((path, index) => ({
         id: `${path}-${Date.now()}-${index}`,
         path,
         name: sourceRootName(path),
         isDirectory: kind === 'sendDirectory',
-      }))))
-      setErrorMsg('')
+      })))
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Không thể chọn đường dẫn.')
     }
@@ -151,8 +156,7 @@ export function SendPanel({
         size: f.size,
         isDirectory: false,
       }))
-      setItems((prev) => appendDistinctRoots(prev, dropped))
-      setErrorMsg('')
+      addItems(dropped)
     }
   }
 

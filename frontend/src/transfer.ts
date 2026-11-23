@@ -209,7 +209,7 @@ export async function syncTransferSnapshot(
   client: Pick<TransferClient, 'getTransferSnapshot'>,
   transferID: string,
   maxRetries: number = MAX_SNAPSHOT_RETRIES,
-): Promise<{ update?: TransferUpdate; trackingLost: boolean; failureCount: number }> {
+): Promise<{ update?: TransferUpdate; trackingLost: boolean; failureCount: number; backendMissing?: boolean }> {
   if (!client.getTransferSnapshot) {
     return { update: tracker.current(), trackingLost: false, failureCount: 0 }
   }
@@ -232,6 +232,21 @@ export async function syncTransferSnapshot(
   }
   if (!isRunning(after.state)) {
     return { update: after, trackingLost: false, failureCount: 0 }
+  }
+
+  // A valid null response is not an IPC failure: the backend explicitly no
+  // longer has this transfer in RAM. Offer a UI-only reset immediately.
+  // If a fresh native event arrived during the call, prefer that newer proof.
+  if (!callFailed && snapshot === null) {
+    if (after !== before) {
+      return { update: after, trackingLost: false, failureCount: 0 }
+    }
+    return {
+      update: undefined,
+      backendMissing: true,
+      trackingLost: true,
+      failureCount: tracker.snapshotFailures(),
+    }
   }
 
   if (!callFailed && snapshot && snapshot.transferID === transferID) {

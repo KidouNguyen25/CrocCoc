@@ -22,6 +22,7 @@ func FinalizeNativeReceive(
 	lease *DestinationLease,
 	stage *ReceiveStage,
 	entries []ManifestEntry,
+	onFinalizing ...func(SessionSnapshot),
 ) (SessionSnapshot, PublishResult, error) {
 	var result PublishResult
 	if c == nil || lease == nil || stage == nil || id == "" {
@@ -30,6 +31,9 @@ func FinalizeNativeReceive(
 	snapshot, ok := c.Advance(id, Finalizing)
 	if !ok {
 		return SessionSnapshot{}, result, ErrReceiveFinalization
+	}
+	if len(onFinalizing) > 0 && onFinalizing[0] != nil {
+		onFinalizing[0](snapshot)
 	}
 	result, err := publishAuditedRoots(lease, stage, entries)
 	if err != nil {

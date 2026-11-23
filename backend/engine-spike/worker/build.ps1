@@ -1,3 +1,5 @@
+param([switch]$SkipVulnScan)
+
 $ErrorActionPreference = "Stop"
 
 if ($env:OS -ne "Windows_NT") {
@@ -62,6 +64,13 @@ try {
     $env:GOOS = "windows"
     Set-Location $PSScriptRoot
     Invoke-Native $go @("test", "-modfile=$modPath", "-trimpath", "-buildvcs=false", "-tags", "croc_no_tailcat", "./...")
+    if (-not $SkipVulnScan) {
+        # govulncheck has no -modfile flag; GOFLAGS ensures the scan uses the
+        # exact patched worker module graph used by the following build.
+        $env:GOFLAGS = "-modfile=$modPath"
+        Invoke-Native govulncheck @("-tags", "croc_no_tailcat", "./...")
+        $env:GOFLAGS = ""
+    }
     Invoke-Native $go @("build", "-modfile=$modPath", "-trimpath", "-buildvcs=false", "-tags", "croc_no_tailcat", "-o", $outputPath, ".")
     $pinPath = Join-Path $repoRoot "backend\transfer\worker_hash_windows.go"
     $pinMatch = [regex]::Match((Get-Content $pinPath -Raw), 'const PinnedWorkerSHA256 = "([A-F0-9]{64})"')

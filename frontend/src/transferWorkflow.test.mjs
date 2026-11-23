@@ -189,8 +189,9 @@ test('syncTransferSnapshot recovers missed FAILED terminal error and enforces bo
 
   const fail2 = await syncTransferSnapshot(tracker, flakyClient, 'recv-42', MAX_SNAPSHOT_RETRIES)
   assert.equal(fail2.update, undefined)
-  assert.equal(fail2.failureCount, 2)
-  assert.equal(fail2.trackingLost, false)
+  assert.equal(fail2.failureCount, 1)
+  assert.equal(fail2.trackingLost, true)
+  assert.equal(fail2.backendMissing, true)
 
   // Third call succeeds and recovers the missed FAILED state with its structured error.
   const recovered = await syncTransferSnapshot(tracker, flakyClient, 'recv-42', MAX_SNAPSHOT_RETRIES)
@@ -206,7 +207,7 @@ test('syncTransferSnapshot recovers missed FAILED terminal error and enforces bo
   tracker.beginStart()
   tracker.resolveStart('send-99')
   const deadClient = {
-    getTransferSnapshot: async () => null,
+    getTransferSnapshot: async () => { throw new Error('IPC unavailable') },
   }
   const r1 = await syncTransferSnapshot(tracker, deadClient, 'send-99', MAX_SNAPSHOT_RETRIES)
   assert.equal(r1.update, undefined)
@@ -222,6 +223,20 @@ test('syncTransferSnapshot recovers missed FAILED terminal error and enforces bo
   assert.equal(r3.failureCount, 3)
 })
 
+test('an explicit null snapshot means backend no longer tracks the session, not IPC failure', async () => {
+  const { createTransferSessionTracker, syncTransferSnapshot } = await import('./transfer.ts')
+  const tracker = createTransferSessionTracker()
+  tracker.beginStart()
+  tracker.resolveStart('gone-1')
+  const result = await syncTransferSnapshot(tracker, {
+    getTransferSnapshot: async () => null,
+  }, 'gone-1')
+  assert.equal(result.backendMissing, true)
+  assert.equal(result.trackingLost, true)
+  assert.equal(result.failureCount, 0)
+  assert.equal(tracker.snapshotFailures(), 0)
+})
+
 test('stale or duplicate native events cannot erase snapshot failure streak', async () => {
   const { createTransferSessionTracker, syncTransferSnapshot } = await import('./transfer.ts')
   const tracker = createTransferSessionTracker()
@@ -230,7 +245,7 @@ test('stale or duplicate native events cannot erase snapshot failure streak', as
   const waiting = { transferID: 'send-1', revision: 3, state: 'WAITING_FOR_PEER' }
   assert.deepEqual(tracker.onEvent(waiting), waiting)
 
-  const unavailable = { getTransferSnapshot: async () => null }
+  const unavailable = { getTransferSnapshot: async () => { throw new Error('IPC unavailable') } }
   assert.equal((await syncTransferSnapshot(tracker, unavailable, 'send-1')).failureCount, 1)
 
   // An out-of-order event and a duplicate are not evidence that IPC recovered.
@@ -260,7 +275,7 @@ test('reconcileSnapshot rejects older revision without resetting failure streak 
   const waiting = { transferID: 'send-77', revision: 3, state: 'WAITING_FOR_PEER' }
   assert.deepEqual(tracker.onEvent(waiting), waiting)
 
-  const deadClient = { getTransferSnapshot: async () => null }
+  const deadClient = { getTransferSnapshot: async () => { throw new Error('IPC unavailable') } }
   assert.equal((await syncTransferSnapshot(tracker, deadClient, 'send-77')).failureCount, 1)
   assert.equal((await syncTransferSnapshot(tracker, deadClient, 'send-77')).failureCount, 2)
   const lost = await syncTransferSnapshot(tracker, deadClient, 'send-77', MAX_SNAPSHOT_RETRIES)

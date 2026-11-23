@@ -16,6 +16,8 @@ import { ModeSwitcher } from './components/ModeSwitcher.tsx'
 import { SendPanel } from './components/SendPanel.tsx'
 import { ReceivePanel } from './components/ReceivePanel.tsx'
 
+type SnapshotProbeResult = { lost: boolean; backendMissing: boolean }
+
 export function App() {
   const [mode, setMode] = useState<'send' | 'receive'>('send')
   const [hasDesktopRuntime, setHasDesktopRuntime] = useState(false)
@@ -27,6 +29,7 @@ export function App() {
   const [connectionCode, setConnectionCode] = useState('')
   const [pending, setPending] = useState(false)
   const [trackingLost, setTrackingLost] = useState(false)
+  const [backendMissing, setBackendMissing] = useState(false)
   const [trackingError, setTrackingError] = useState('')
   const [forceResetAvailable, setForceResetAvailable] = useState(false)
   const [pollRecoveryToken, setPollRecoveryToken] = useState(0)
@@ -36,12 +39,13 @@ export function App() {
   const mockClient = useMemo(() => createMockTransferClient(), [])
   const clientRef = useRef<TransferClient>(mockClient)
   const trackerRef = useRef(createTransferSessionTracker())
-  const snapshotInFlightRef = useRef(false)
+  const snapshotInFlightRef = useRef<{ transferID: string; promise: Promise<SnapshotProbeResult> } | null>(null)
 
   const applyTrackedUpdate = (next: TransferUpdate | undefined) => {
     if (!next) return
     setUpdate(next)
     setTrackingLost(false)
+    setBackendMissing(false)
     setTrackingError('')
     setForceResetAvailable(false)
     setAppError((prev) => (prev === SNAPSHOT_LOST_TRACKING_MESSAGE ? '' : prev))
@@ -101,38 +105,59 @@ export function App() {
   const activeRunning = Boolean(activeTransferID && isRunning(state))
   const displayedError = trackingError || appError
 
-  const probeSnapshot = async (
+  const probeSnapshot = (
     transferID: string,
     allowWhenLost = false,
-  ): Promise<boolean> => {
-    if (!clientRef.current.getTransferSnapshot) return false
-    if (snapshotInFlightRef.current) return false
+  ): Promise<SnapshotProbeResult> => {
+    const noChange: SnapshotProbeResult = { lost: false, backendMissing: false }
+    const inFlight = snapshotInFlightRef.current
+    if (inFlight) {
+      // A cancel request must await the already-running focus/timer probe
+      // rather than using an old failure counter to enable forced reset.
+      return inFlight.transferID === transferID ? inFlight.promise : Promise.resolve(noChange)
+    }
+    if (!clientRef.current.getTransferSnapshot) return Promise.resolve(noChange)
     const wasLost = trackerRef.current.snapshotFailures() >= MAX_SNAPSHOT_RETRIES
-    if (wasLost && !allowWhenLost) return false
-    snapshotInFlightRef.current = true
-    try {
+    if (wasLost && !allowWhenLost) return Promise.resolve(noChange)
+
+    const promise = (async (): Promise<SnapshotProbeResult> => {
       const result = await syncTransferSnapshot(
         trackerRef.current,
         clientRef.current,
         transferID,
         MAX_SNAPSHOT_RETRIES,
       )
+      if (result.backendMissing) {
+        setTrackingLost(true)
+        setBackendMissing(true)
+        setForceResetAvailable(true)
+        setTrackingError('Backend không còn lưu phiên này. Có thể đặt lại giao diện mà không cần hủy phiên.')
+        return { lost: true, backendMissing: true }
+      }
       if (result.trackingLost) {
         setTrackingLost(true)
+        setBackendMissing(false)
         setTrackingError(SNAPSHOT_LOST_TRACKING_MESSAGE)
-        return true
+        return { lost: true, backendMissing: false }
       }
       if (result.update && result.failureCount === 0) {
         applyTrackedUpdate(result.update)
         if (wasLost && isRunning(result.update.state)) {
           setPollRecoveryToken((token) => token + 1)
         }
-        return false
       }
-      return false
-    } finally {
-      snapshotInFlightRef.current = false
-    }
+      return noChange
+    })()
+    snapshotInFlightRef.current = { transferID, promise }
+    void promise.then(
+      () => {
+        if (snapshotInFlightRef.current?.promise === promise) snapshotInFlightRef.current = null
+      },
+      () => {
+        if (snapshotInFlightRef.current?.promise === promise) snapshotInFlightRef.current = null
+      },
+    )
+    return promise
   }
 
   useEffect(() => {
@@ -144,7 +169,7 @@ export function App() {
 
     const runSync = async (allowWhenLost = false) => {
       if (cancelled) return
-      const lost = await probeSnapshot(activeTransferID, allowWhenLost)
+      const { lost } = await probeSnapshot(activeTransferID, allowWhenLost)
       if (!cancelled && lost && timer !== undefined) {
         clearInterval(timer)
         timer = undefined
@@ -181,9 +206,10 @@ export function App() {
     // Buffer events by ID before Start* resolves and never let a previous
     // terminal session block a newly started session.
     trackerRef.current.beginStart()
-    snapshotInFlightRef.current = false
+    snapshotInFlightRef.current = null
     setPending(true)
     setTrackingLost(false)
+    setBackendMissing(false)
     setTrackingError('')
     setForceResetAvailable(false)
     setAppError('')
@@ -259,15 +285,16 @@ export function App() {
     }
     // Recover the actual native state before ever offering a UI-only reset.
     // An accepted cancellation is asynchronous and is not a terminal update.
-    await probeSnapshot(transferID, true)
+    const probe = await probeSnapshot(transferID, true)
     const current = trackerRef.current.current()
-    const stillLost = current?.transferID === transferID &&
+    const stillLost = !probe.backendMissing && current?.transferID === transferID &&
       isRunning(current.state) &&
       trackerRef.current.snapshotFailures() >= MAX_SNAPSHOT_RETRIES
     if (cancelIssue && stillLost) {
       setTrackingError(cancelIssue)
       setForceResetAvailable(true)
-    } else if (cancelIssue && current?.transferID === transferID && isRunning(current.state)) {
+    } else if (cancelIssue && !probe.backendMissing &&
+      current?.transferID === transferID && isRunning(current.state)) {
       // A healthy subsequent snapshot or native event clears this transient notice.
       setTrackingError(cancelIssue)
     }
@@ -279,13 +306,14 @@ export function App() {
       return
     }
     trackerRef.current.reset()
-    snapshotInFlightRef.current = false
+    snapshotInFlightRef.current = null
     setTrackingLost(false)
+    setBackendMissing(false)
     setTrackingError('')
     setForceResetAvailable(false)
     setUpdate(undefined)
     setConnectionCode('')
-    setAppError(force
+    setAppError(force && !backendMissing
       ? 'Chỉ đặt lại giao diện, chưa xác nhận backend đã dừng. Phiên mới có thể bị từ chối BUSY; hãy kiểm tra lại engine trước khi thử.'
       : '')
   }
@@ -342,9 +370,11 @@ export function App() {
                         className="btn-secondary btn-alert-action"
                         onClick={() => handleReset(true)}
                       >
-                        Buộc đặt lại giao diện
+                        {backendMissing ? 'Đặt lại giao diện' : 'Buộc đặt lại giao diện'}
                       </button>
-                      <span>Chỉ đặt lại màn hình; backend có thể vẫn đang truyền và từ chối phiên mới (BUSY).</span>
+                      {!backendMissing && (
+                        <span>Chỉ đặt lại màn hình; backend có thể vẫn đang truyền và từ chối phiên mới (BUSY).</span>
+                      )}
                     </>
                   )}
                 </div>

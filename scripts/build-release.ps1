@@ -30,7 +30,7 @@ $dirty = (& git status --porcelain)
 if ($dirty -and -not $AllowDirty) { throw "Cây làm việc chưa sạch. Commit hoặc dùng -AllowDirty (bản này sẽ không được nghiệm thu)." }
 
 $wailsVersionLine = (& wails version) | Select-Object -Last 1
-$wailsPin = [regex]::Match((Get-Content -Raw (Join-Path $repoRoot "go.mod")), '(?m)^require\s+github\.com/wailsapp/wails/v2\s+(v[0-9]+\.[0-9]+\.[0-9]+)').Groups[1].Value
+$wailsPin = [regex]::Match((Get-Content -Raw (Join-Path $repoRoot "go.mod")), '(?m)^\s*(?:require\s+)?github\.com/wailsapp/wails/v2\s+(v[0-9]+\.[0-9]+\.[0-9]+)').Groups[1].Value
 if (-not $wailsPin -or $wailsVersionLine -notmatch [regex]::Escape($wailsPin)) {
     throw "Wails CLI cần khớp phiên bản trong go.mod ($wailsPin), đang có: $wailsVersionLine"
 }
@@ -46,7 +46,7 @@ if (-not $SkipTests) { Invoke-Native npm @("--prefix", "frontend", "test") }
 Invoke-Native npm @("--prefix", "frontend", "run", "build")
 
 # 3. Worker Croc đã ghim (build.ps1 tự dừng nếu hash không khớp backend/transfer/worker_hash_windows.go).
-& (Join-Path $repoRoot "backend\engine-spike\worker\build.ps1")
+& (Join-Path $repoRoot "backend\engine-spike\worker\build.ps1") -SkipVulnScan:$SkipTests
 $workerBuilt = Join-Path $repoRoot "backend\engine-spike\worker\croccoc-engine-spike.exe"
 if (-not (Test-Path -LiteralPath $workerBuilt)) { throw "Không thấy worker sau khi build." }
 $pinText = Get-Content -Raw (Join-Path $repoRoot "backend\transfer\worker_hash_windows.go")

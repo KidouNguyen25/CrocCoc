@@ -47,6 +47,9 @@ type engineService struct {
 	shutdownTimeout time.Duration
 
 	mu                    sync.Mutex
+	shuttingDown          bool
+	preflightCount        int
+	preflightDone         chan struct{}
 	sessions              map[string]*engineSession
 	sendCode              map[string]string
 	lastProgressID        string
@@ -70,26 +73,57 @@ func NewEngineService(config EngineServiceConfig) EngineController {
 }
 
 func (s *engineService) GetCrocInfo() CrocInfo {
-	if s != nil && s.recoveryErr != nil {
+	if s == nil {
+		return CrocInfo{Available: false, Message: ErrWorkerUnavailable.Error()}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.recoveryErr != nil {
 		return CrocInfo{Available: false, Message: s.recoveryErr.Error()}
 	}
-	if s == nil || s.worker == nil || s.workerPin == nil || s.cfg.RelayAddress == "" || s.cfg.RelayPassword == "" {
+	if s.shuttingDown || s.worker == nil || s.workerPin == nil || s.cfg.RelayAddress == "" || s.cfg.RelayPassword == "" {
 		return CrocInfo{Available: false, Message: ErrWorkerUnavailable.Error()}
 	}
 	return CrocInfo{Available: true, Version: PinnedCrocVersion}
 }
 
-func (s *engineService) unavailableError() error {
-	if s != nil && s.recoveryErr != nil {
+// Preflight is admitted under the same lock as Shutdown's lifecycle latch.
+// The drain channel prevents Shutdown from releasing the pinned executable
+// while an admitted Start* is still inspecting sources/destinations.
+func (s *engineService) beginPreflight() error {
+	if s == nil {
+		return ErrWorkerUnavailable
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.recoveryErr != nil {
 		return s.recoveryErr
 	}
-	return ErrWorkerUnavailable
+	if s.shuttingDown || s.worker == nil || s.workerPin == nil || s.cfg.RelayAddress == "" || s.cfg.RelayPassword == "" {
+		return ErrWorkerUnavailable
+	}
+	if s.preflightCount == 0 {
+		s.preflightDone = make(chan struct{})
+	}
+	s.preflightCount++
+	return nil
+}
+
+func (s *engineService) endPreflight() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.preflightCount--
+	if s.preflightCount == 0 {
+		close(s.preflightDone)
+		s.preflightDone = nil
+	}
 }
 
 func (s *engineService) StartSend(paths []string) (string, error) {
-	if s == nil || !s.GetCrocInfo().Available {
-		return "", s.unavailableError()
+	if err := s.beginPreflight(); err != nil {
+		return "", err
 	}
+	defer s.endPreflight()
 	preparationCtx, preparationCancel := context.WithTimeout(context.Background(), PreparationTimeout)
 	defer preparationCancel()
 	sources, manifest, err := AcquireSendSourceLeaseContext(preparationCtx, paths)
@@ -117,8 +151,17 @@ func (s *engineService) StartSend(paths []string) (string, error) {
 		_ = sources.Close()
 		return "", ErrPreparationTimeout
 	}
+	// Begin/registration is atomic with Shutdown's admission latch. If
+	// shutdown won while the source lease was being acquired, fail closed.
+	s.mu.Lock()
+	if s.shuttingDown {
+		s.mu.Unlock()
+		_ = sources.Close()
+		return "", ErrWorkerUnavailable
+	}
 	started, err := s.coordinator.Begin()
 	if err != nil {
+		s.mu.Unlock()
 		_ = sources.Close()
 		return "", err
 	}
@@ -126,6 +169,7 @@ func (s *engineService) StartSend(paths []string) (string, error) {
 	if !ok {
 		_, _ = s.coordinator.Fail(started.TransferID, ErrWorkerProtocol)
 		_ = s.coordinator.Release(started.TransferID)
+		s.mu.Unlock()
 		_ = sources.Close()
 		return "", ErrWorkerProtocol
 	}
@@ -137,7 +181,6 @@ func (s *engineService) StartSend(paths []string) (string, error) {
 		sources:    sources,
 		bytesTotal: manifestTotalBytes(manifest),
 	}
-	s.mu.Lock()
 	s.sessions[session.id] = session
 	s.sendCode[session.id] = code
 	s.mu.Unlock()
@@ -176,9 +219,11 @@ func (s *engineService) runSend(ctx context.Context, session *engineSession, cod
 		if completed, ok := s.coordinator.Advance(id, Completed); ok {
 			s.emit(completed, "", "")
 		}
-		// Cancellation may win between any two transitions above even when the
-		// worker has already returned success. Never strand the coordinator in
-		// CANCELLING (and accidentally drop its session without releasing BUSY).
+		// Cancellation and completion use the coordinator's state gate as
+		// their linearization point. If cancellation won before FINALIZING,
+		// report CANCELLED even if the worker concurrently returned success;
+		// claiming COMPLETED would contradict the accepted cancel. Do not
+		// strand the session in CANCELLING (which would keep BUSY forever).
 		if cancelled, ok := s.coordinator.Advance(id, Cancelled); ok {
 			s.emit(cancelled, "", "")
 		}
@@ -198,9 +243,10 @@ func (s *engineService) markSendTransferring(id string) {
 }
 
 func (s *engineService) StartReceive(code, outputDir string) (string, error) {
-	if s == nil || !s.GetCrocInfo().Available {
-		return "", s.unavailableError()
+	if err := s.beginPreflight(); err != nil {
+		return "", err
 	}
+	defer s.endPreflight()
 	if strings.TrimSpace(code) == "" || strings.ContainsAny(code, "\r\n\x00") || outputDir == "" {
 		return "", ErrInvalidInput
 	}
@@ -211,14 +257,21 @@ func (s *engineService) StartReceive(code, outputDir string) (string, error) {
 	if time.Since(preparationStarted) >= PreparationTimeout {
 		return "", ErrPreparationTimeout
 	}
+	s.mu.Lock()
+	if s.shuttingDown {
+		s.mu.Unlock()
+		return "", ErrWorkerUnavailable
+	}
 	started, err := s.coordinator.BeginReceive()
 	if err != nil {
+		s.mu.Unlock()
 		return "", err
 	}
 	waiting, ok := s.coordinator.Advance(started.TransferID, WaitingForPeer)
 	if !ok {
 		_, _ = s.coordinator.Fail(started.TransferID, ErrWorkerProtocol)
 		_ = s.coordinator.Release(started.TransferID)
+		s.mu.Unlock()
 		return "", ErrWorkerProtocol
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -228,7 +281,6 @@ func (s *engineService) StartReceive(code, outputDir string) (string, error) {
 		done:     make(chan struct{}),
 		decision: make(chan receiveDecision, 1),
 	}
-	s.mu.Lock()
 	s.sessions[session.id] = session
 	s.mu.Unlock()
 	s.emit(waiting, "", "")
@@ -310,13 +362,17 @@ func (s *engineService) runReceive(ctx context.Context, session *engineSession, 
 			s.finishReceiveSession(session.id, adoptErr, false, !recoverClosedStage(stage, pending))
 			return
 		}
-		final, result, finalErr := FinalizeNativeReceive(&s.coordinator, session.id, pending.lease, stage, pending.entries)
+		final, result, finalErr := FinalizeNativeReceive(&s.coordinator, session.id, pending.lease, stage, pending.entries,
+			func(finalizing SessionSnapshot) { s.emit(finalizing, "", "") })
 		if finalErr != nil {
 			s.finishReceiveSession(session.id, finalErr, result.Partial, !recoverClosedStage(stage, pending))
 		} else {
 			s.emit(final, "", "")
 			_ = result
-			s.releaseSession(session.id)
+			// FinalizeNativeReceive has already released the coordinator.
+			// A newly admitted session may replace recent before we get here.
+			// Do not rely on a second Snapshot lookup to drop this map entry.
+			s.forgetSession(session.id, true)
 		}
 		return
 	}
@@ -427,7 +483,7 @@ func (s *engineService) GetTransferUpdate(id string) (Update, bool) {
 			update.ReceiveOffer = &offer
 		}
 	case Transferring, Finalizing, Completed:
-		update.BytesTransferred, update.BytesTotal = s.progressFields(id)
+		update.BytesTransferred, update.BytesTotal = s.progressFields(id, snapshot.State == Completed)
 	}
 	return update, true
 }
@@ -463,6 +519,12 @@ func (s *engineService) Shutdown() {
 		timeout = WorkerCleanupTimeout
 	}
 	s.mu.Lock()
+	if s.shuttingDown {
+		s.mu.Unlock()
+		return
+	}
+	s.shuttingDown = true
+	preflightDone := s.preflightDone
 	ids := make([]string, 0, len(s.sessions))
 	waitChans := make([]<-chan struct{}, 0, len(s.sessions))
 	for id, session := range s.sessions {
@@ -477,10 +539,20 @@ func (s *engineService) Shutdown() {
 		_, _ = s.CancelTransfer(id)
 	}
 
+	// One bounded deadline covers both preflight drain and worker cleanup.
+	// A timed-out preflight must keep the worker executable pin locked, even
+	// when no session was registered when Shutdown began.
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
 	allDone := true
-	if len(waitChans) > 0 {
-		deadline := time.NewTimer(timeout)
-		defer deadline.Stop()
+	if preflightDone != nil {
+		select {
+		case <-preflightDone:
+		case <-deadline.C:
+			allDone = false
+		}
+	}
+	if allDone {
 		for _, ch := range waitChans {
 			select {
 			case <-ch:
@@ -646,18 +718,25 @@ func (s *engineService) finishReceiveSession(id string, cause error, partialOutp
 	}
 }
 
-// progressFields keeps completed transfer metrics readable from a terminal
-// snapshot even after engineSession has been released from memory.
-func (s *engineService) progressFields(id string) (string, string) {
+// progressFields keeps completed transfer metrics readable even after the
+// session is released. Successful COMPLETED means all verified payload bytes
+// were transferred, including when progress frames were coalesced/skipped.
+func (s *engineService) progressFields(id string, completed bool) (string, string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if session := s.sessions[id]; session != nil && session.bytesTotal > 0 {
-		return strconv.FormatInt(session.bytesTransferred, 10), strconv.FormatInt(session.bytesTotal, 10)
+	var transferred, total int64
+	if session := s.sessions[id]; session != nil {
+		transferred, total = session.bytesTransferred, session.bytesTotal
+	} else if s.lastProgressID == id {
+		transferred, total = s.lastBytesTransferred, s.lastBytesTotal
 	}
-	if s.lastProgressID == id && s.lastBytesTotal > 0 {
-		return strconv.FormatInt(s.lastBytesTransferred, 10), strconv.FormatInt(s.lastBytesTotal, 10)
+	if total <= 0 {
+		return "", ""
 	}
-	return "", ""
+	if completed {
+		transferred = total
+	}
+	return strconv.FormatInt(transferred, 10), strconv.FormatInt(total, 10)
 }
 
 func (s *engineService) releaseSession(id string) {
@@ -668,12 +747,23 @@ func (s *engineService) releaseSession(id string) {
 		// already have released the terminal snapshot before reaching here.
 		return
 	}
-	_ = s.coordinator.Release(id)
+	if !s.coordinator.Release(id) {
+		return
+	}
+	s.forgetSession(id, snapshot.State == Completed)
+}
+
+// forgetSession is also used when the receive finalizer already called
+// Coordinator.Release; there may no longer be a recent snapshot for id.
+func (s *engineService) forgetSession(id string, completed bool) {
 	s.mu.Lock()
 	if session := s.sessions[id]; session != nil {
 		s.lastProgressID = id
 		s.lastBytesTransferred = session.bytesTransferred
 		s.lastBytesTotal = session.bytesTotal
+		if completed && session.bytesTotal > 0 {
+			s.lastBytesTransferred = session.bytesTotal
+		}
 	}
 	delete(s.sessions, id)
 	delete(s.sendCode, id)
@@ -688,7 +778,7 @@ func (s *engineService) emit(snapshot SessionSnapshot, message, code string) {
 		Revision: snapshot.Revision, Message: message, ConnectionCode: code,
 		PartialOutput: snapshot.PartialOutput, CleanupPending: snapshot.CleanupPending}
 	if snapshot.State == Transferring || snapshot.State == Finalizing || snapshot.State == Completed {
-		update.BytesTransferred, update.BytesTotal = s.progressFields(snapshot.TransferID)
+		update.BytesTransferred, update.BytesTotal = s.progressFields(snapshot.TransferID, snapshot.State == Completed)
 	}
 	s.cfg.EventSink(update)
 }
