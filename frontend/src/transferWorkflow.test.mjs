@@ -183,10 +183,12 @@ test('syncTransferSnapshot recovers missed FAILED terminal error and enforces bo
   }
 
   const fail1 = await syncTransferSnapshot(tracker, flakyClient, 'recv-42', MAX_SNAPSHOT_RETRIES)
+  assert.equal(fail1.update, undefined)
   assert.equal(fail1.failureCount, 1)
   assert.equal(fail1.trackingLost, false)
 
   const fail2 = await syncTransferSnapshot(tracker, flakyClient, 'recv-42', MAX_SNAPSHOT_RETRIES)
+  assert.equal(fail2.update, undefined)
   assert.equal(fail2.failureCount, 2)
   assert.equal(fail2.trackingLost, false)
 
@@ -207,12 +209,124 @@ test('syncTransferSnapshot recovers missed FAILED terminal error and enforces bo
     getTransferSnapshot: async () => null,
   }
   const r1 = await syncTransferSnapshot(tracker, deadClient, 'send-99', MAX_SNAPSHOT_RETRIES)
+  assert.equal(r1.update, undefined)
   assert.equal(r1.trackingLost, false)
   assert.equal(r1.failureCount, 1)
   const r2 = await syncTransferSnapshot(tracker, deadClient, 'send-99', MAX_SNAPSHOT_RETRIES)
+  assert.equal(r2.update, undefined)
   assert.equal(r2.trackingLost, false)
   assert.equal(r2.failureCount, 2)
   const r3 = await syncTransferSnapshot(tracker, deadClient, 'send-99', MAX_SNAPSHOT_RETRIES)
+  assert.equal(r3.update, undefined)
   assert.equal(r3.trackingLost, true)
   assert.equal(r3.failureCount, 3)
+})
+
+test('stale or duplicate native events cannot erase snapshot failure streak', async () => {
+  const { createTransferSessionTracker, syncTransferSnapshot } = await import('./transfer.ts')
+  const tracker = createTransferSessionTracker()
+  tracker.beginStart()
+  tracker.resolveStart('send-1')
+  const waiting = { transferID: 'send-1', revision: 3, state: 'WAITING_FOR_PEER' }
+  assert.deepEqual(tracker.onEvent(waiting), waiting)
+
+  const unavailable = { getTransferSnapshot: async () => null }
+  assert.equal((await syncTransferSnapshot(tracker, unavailable, 'send-1')).failureCount, 1)
+
+  // An out-of-order event and a duplicate are not evidence that IPC recovered.
+  assert.equal(tracker.onEvent({ ...waiting, revision: 2, state: 'PREPARING' }), undefined)
+  assert.equal(tracker.onEvent(waiting), undefined)
+  assert.equal(tracker.snapshotFailures(), 1)
+
+  assert.equal((await syncTransferSnapshot(tracker, unavailable, 'send-1')).failureCount, 2)
+  assert.equal(tracker.onEvent({ transferID: 'other', revision: 99, state: 'FAILED' }), undefined)
+  const lost = await syncTransferSnapshot(tracker, unavailable, 'send-1')
+  assert.equal(lost.trackingLost, true)
+  assert.equal(lost.failureCount, 3)
+
+  // A new legitimate revision recovers tracking.
+  assert.deepEqual(
+    tracker.onEvent({ transferID: 'send-1', revision: 4, state: 'TRANSFERRING' }),
+    { transferID: 'send-1', revision: 4, state: 'TRANSFERRING' },
+  )
+  assert.equal(tracker.snapshotFailures(), 0)
+})
+
+test('reconcileSnapshot rejects older revision without resetting failure streak and recovers on equal or newer snapshot', async () => {
+  const { createTransferSessionTracker, syncTransferSnapshot, MAX_SNAPSHOT_RETRIES } = await import('./transfer.ts')
+  const tracker = createTransferSessionTracker()
+  tracker.beginStart()
+  tracker.resolveStart('send-77')
+  const waiting = { transferID: 'send-77', revision: 3, state: 'WAITING_FOR_PEER' }
+  assert.deepEqual(tracker.onEvent(waiting), waiting)
+
+  const deadClient = { getTransferSnapshot: async () => null }
+  assert.equal((await syncTransferSnapshot(tracker, deadClient, 'send-77')).failureCount, 1)
+  assert.equal((await syncTransferSnapshot(tracker, deadClient, 'send-77')).failureCount, 2)
+  const lost = await syncTransferSnapshot(tracker, deadClient, 'send-77', MAX_SNAPSHOT_RETRIES)
+  assert.equal(lost.trackingLost, true)
+  assert.equal(lost.failureCount, 3)
+
+  // Stale snapshot (revision 2 < 3) must be ignored and keep failureCount at 3.
+  const staleClient = {
+    getTransferSnapshot: async () => ({
+      transferID: 'send-77',
+      revision: 2,
+      state: 'PREPARING',
+    }),
+  }
+  const staleRes = await syncTransferSnapshot(tracker, staleClient, 'send-77', MAX_SNAPSHOT_RETRIES)
+  assert.equal(staleRes.update, undefined)
+  assert.equal(staleRes.trackingLost, true)
+  assert.equal(staleRes.failureCount, 3)
+  assert.equal(tracker.snapshotFailures(), 3)
+
+  // Same revision (3 === 3) proves IPC is alive again and resets failure streak.
+  const sameRevClient = {
+    getTransferSnapshot: async () => waiting,
+  }
+  const sameRes = await syncTransferSnapshot(tracker, sameRevClient, 'send-77', MAX_SNAPSHOT_RETRIES)
+  assert.deepEqual(sameRes.update, waiting)
+  assert.equal(sameRes.trackingLost, false)
+  assert.equal(sameRes.failureCount, 0)
+  assert.equal(tracker.snapshotFailures(), 0)
+
+  // Higher terminal revision after another failure streak recovers terminal state.
+  await syncTransferSnapshot(tracker, deadClient, 'send-77', MAX_SNAPSHOT_RETRIES)
+  await syncTransferSnapshot(tracker, deadClient, 'send-77', MAX_SNAPSHOT_RETRIES)
+  await syncTransferSnapshot(tracker, deadClient, 'send-77', MAX_SNAPSHOT_RETRIES)
+  assert.equal(tracker.snapshotFailures(), 3)
+
+  const terminalClient = {
+    getTransferSnapshot: async () => ({
+      transferID: 'send-77',
+      revision: 5,
+      state: 'COMPLETED',
+    }),
+  }
+  const terminalRes = await syncTransferSnapshot(tracker, terminalClient, 'send-77', MAX_SNAPSHOT_RETRIES)
+  assert.equal(terminalRes.update?.state, 'COMPLETED')
+  assert.equal(terminalRes.trackingLost, false)
+  assert.equal(terminalRes.failureCount, 0)
+})
+
+test('canToggleMockMode blocks switching engine while pending or in any running state', async () => {
+  const { canToggleMockMode } = await import('./transfer.ts')
+  // Blocked while Start* is pending even if state is still IDLE.
+  assert.equal(canToggleMockMode(true, 'IDLE'), false)
+  // Blocked in all running states.
+  for (const state of [
+    'PREPARING',
+    'WAITING_FOR_PEER',
+    'AWAITING_ACCEPTANCE',
+    'TRANSFERRING',
+    'FINALIZING',
+    'CANCELLING',
+  ]) {
+    assert.equal(canToggleMockMode(false, state), false)
+  }
+  // Permitted only when not pending and in IDLE or terminal states.
+  for (const state of ['IDLE', 'COMPLETED', 'FAILED', 'CANCELLED']) {
+    assert.equal(canToggleMockMode(false, state), true)
+  }
 })

@@ -2,6 +2,7 @@ import { useEffect, useState, useRef, useMemo } from 'react'
 import { getDesktopClient } from './adapters/wailsTransfer.ts'
 import { createMockTransferClient } from './mockTransfer.ts'
 import {
+  canToggleMockMode,
   createTransferSessionTracker,
   isRunning,
   syncTransferSnapshot,
@@ -25,16 +26,20 @@ export function App() {
   const [update, setUpdate] = useState<TransferUpdate>()
   const [connectionCode, setConnectionCode] = useState('')
   const [pending, setPending] = useState(false)
+  const [trackingLost, setTrackingLost] = useState(false)
+  const [pollRecoveryToken, setPollRecoveryToken] = useState(0)
   const [appError, setAppError] = useState('')
 
   // Create persistent mock client instance for browser preview
   const mockClient = useMemo(() => createMockTransferClient(), [])
   const clientRef = useRef<TransferClient>(mockClient)
   const trackerRef = useRef(createTransferSessionTracker())
+  const snapshotInFlightRef = useRef(false)
 
   const applyTrackedUpdate = (next: TransferUpdate | undefined) => {
     if (!next) return
     setUpdate(next)
+    setTrackingLost(false)
     setAppError((prev) => (prev === SNAPSHOT_LOST_TRACKING_MESSAGE ? '' : prev))
     if (next.connectionCode) {
       setConnectionCode(next.connectionCode)
@@ -72,7 +77,13 @@ export function App() {
 
     // Subscribe to transfer events
     const unsubscribe = clientRef.current.subscribe((event) => {
-      applyTrackedUpdate(trackerRef.current.onEvent(event))
+      const trackingWasLost = trackerRef.current.snapshotFailures() >= MAX_SNAPSHOT_RETRIES
+      const accepted = trackerRef.current.onEvent(event)
+      if (accepted && trackingWasLost) {
+        // A fresh native event restores tracking; resume polling for a missed terminal event.
+        setPollRecoveryToken((token) => token + 1)
+      }
+      applyTrackedUpdate(accepted)
     })
 
     return () => {
@@ -81,23 +92,41 @@ export function App() {
   }, [useMock, mockClient])
 
   const state = update?.state ?? 'IDLE'
-  const busy = pending || isRunning(state)
+  const busy = !canToggleMockMode(pending, state)
   const activeTransferID = update?.transferID
   const activeRunning = Boolean(activeTransferID && isRunning(state))
 
-  const pollSnapshot = async (transferID: string) => {
-    if (!clientRef.current.getTransferSnapshot) return
-    const result = await syncTransferSnapshot(
-      trackerRef.current,
-      clientRef.current,
-      transferID,
-      MAX_SNAPSHOT_RETRIES,
-    )
-    if (result.update) {
-      applyTrackedUpdate(result.update)
-    }
-    if (result.trackingLost) {
-      setAppError(SNAPSHOT_LOST_TRACKING_MESSAGE)
+  const probeSnapshot = async (
+    transferID: string,
+    allowWhenLost = false,
+  ): Promise<boolean> => {
+    if (!clientRef.current.getTransferSnapshot) return false
+    if (snapshotInFlightRef.current) return false
+    const wasLost = trackerRef.current.snapshotFailures() >= MAX_SNAPSHOT_RETRIES
+    if (wasLost && !allowWhenLost) return false
+    snapshotInFlightRef.current = true
+    try {
+      const result = await syncTransferSnapshot(
+        trackerRef.current,
+        clientRef.current,
+        transferID,
+        MAX_SNAPSHOT_RETRIES,
+      )
+      if (result.trackingLost) {
+        setTrackingLost(true)
+        setAppError(SNAPSHOT_LOST_TRACKING_MESSAGE)
+        return true
+      }
+      if (result.update && result.failureCount === 0) {
+        applyTrackedUpdate(result.update)
+        if (wasLost && isRunning(result.update.state)) {
+          setPollRecoveryToken((token) => token + 1)
+        }
+        return false
+      }
+      return false
+    } finally {
+      snapshotInFlightRef.current = false
     }
   }
 
@@ -106,33 +135,14 @@ export function App() {
       return
     }
     let cancelled = false
-    let inFlight = false
     let timer: ReturnType<typeof setInterval> | undefined
 
-    const runSync = async () => {
-      if (cancelled || inFlight) return
-      if (trackerRef.current.snapshotFailures() >= MAX_SNAPSHOT_RETRIES) return
-      inFlight = true
-      try {
-        const result = await syncTransferSnapshot(
-          trackerRef.current,
-          clientRef.current,
-          activeTransferID,
-          MAX_SNAPSHOT_RETRIES,
-        )
-        if (cancelled) return
-        if (result.update) {
-          applyTrackedUpdate(result.update)
-        }
-        if (result.trackingLost) {
-          setAppError(SNAPSHOT_LOST_TRACKING_MESSAGE)
-          if (timer !== undefined) {
-            clearInterval(timer)
-            timer = undefined
-          }
-        }
-      } finally {
-        inFlight = false
+    const runSync = async (allowWhenLost = false) => {
+      if (cancelled) return
+      const lost = await probeSnapshot(activeTransferID, allowWhenLost)
+      if (!cancelled && lost && timer !== undefined) {
+        clearInterval(timer)
+        timer = undefined
       }
     }
 
@@ -140,11 +150,13 @@ export function App() {
       if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
         return
       }
-      void runSync()
+      // Allow a single recovery probe on window focus/visibility even after
+      // interval polling stopped at MAX_SNAPSHOT_RETRIES.
+      void runSync(true)
     }
 
     timer = setInterval(() => {
-      void runSync()
+      void runSync(false)
     }, SNAPSHOT_POLL_INTERVAL_MS)
 
     window.addEventListener('focus', handleFocusOrVisible)
@@ -158,13 +170,15 @@ export function App() {
       window.removeEventListener('focus', handleFocusOrVisible)
       document.removeEventListener('visibilitychange', handleFocusOrVisible)
     }
-  }, [activeTransferID, activeRunning])
+  }, [activeTransferID, activeRunning, pollRecoveryToken])
 
   const beginTransfer = async (request: () => Promise<string>, fallbackError: string) => {
     // Buffer events by ID before Start* resolves and never let a previous
     // terminal session block a newly started session.
     trackerRef.current.beginStart()
+    snapshotInFlightRef.current = false
     setPending(true)
+    setTrackingLost(false)
     setAppError('')
     setConnectionCode('')
     setUpdate(undefined)
@@ -172,7 +186,7 @@ export function App() {
       const transferID = await request()
       const { update: started } = trackerRef.current.resolveStart(transferID)
       applyTrackedUpdate(started)
-      void pollSnapshot(transferID)
+      void probeSnapshot(transferID, false)
     } catch (err) {
       trackerRef.current.failStart()
       setAppError(err instanceof Error ? err.message : fallbackError)
@@ -226,6 +240,8 @@ export function App() {
 
   const handleReset = () => {
     trackerRef.current.reset()
+    snapshotInFlightRef.current = false
+    setTrackingLost(false)
     setUpdate(undefined)
     setConnectionCode('')
     setAppError('')
@@ -258,14 +274,35 @@ export function App() {
             <div className="error-alert top-alert" role="alert">
               <span className="error-icon">⚠</span>
               <span>{appError}</span>
-              <button
-                type="button"
-                className="btn-close-alert"
-                onClick={() => setAppError('')}
-                aria-label="Đóng thông báo lỗi"
-              >
-                ✕
-              </button>
+              {trackingLost && activeTransferID ? (
+                <div className="alert-actions">
+                  <button
+                    type="button"
+                    className="btn-secondary btn-alert-action"
+                    onClick={() => {
+                      void probeSnapshot(activeTransferID, true)
+                    }}
+                  >
+                    Thử đồng bộ lại
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-secondary btn-alert-action"
+                    onClick={handleReset}
+                  >
+                    Đặt lại màn hình
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  className="btn-close-alert"
+                  onClick={() => setAppError('')}
+                  aria-label="Đóng thông báo lỗi"
+                >
+                  ✕
+                </button>
+              )}
             </div>
           )}
 
@@ -304,10 +341,15 @@ export function App() {
             <button
               type="button"
               className="btn-toggle-mock"
+              aria-pressed={useMock}
               onClick={() => {
+                // Never detach the live engine listener while a transfer is active.
+                if (busy) return
                 setUseMock(!useMock)
                 handleReset()
               }}
+              disabled={busy}
+              title={busy ? 'Không thể đổi engine trong khi truyền tệp' : undefined}
             >
               {useMock ? 'Chuyển sang Engine thật' : 'Chuyển sang Chế độ mô phỏng'}
             </button>

@@ -136,8 +136,11 @@ export function createTransferSessionTracker(): TransferSessionTracker {
         return undefined
       }
       if (event.transferID !== activeID) return undefined
-      failureCount = 0
       const accepted = acceptTransferUpdate(latest, event)
+      // Replayed or out-of-order events do not prove that IPC is healthy.
+      // Keep the snapshot failure streak until a newer event is accepted.
+      if (accepted === latest) return undefined
+      failureCount = 0
       latest = accepted
       return accepted
     },
@@ -153,6 +156,16 @@ export function createTransferSessionTracker(): TransferSessionTracker {
     },
     reconcileSnapshot(transferID, snapshot) {
       if (!snapshot || activeID !== transferID || snapshot.transferID !== transferID) {
+        return undefined
+      }
+      // A stale snapshot with a lower revision than already observed does not prove
+      // healthy IPC progress and must not clear the snapshot failure streak.
+      if (
+        latest &&
+        latest.transferID === transferID &&
+        latest.revision !== undefined &&
+        (snapshot.revision ?? 0) < latest.revision
+      ) {
         return undefined
       }
       failureCount = 0
@@ -223,11 +236,23 @@ export async function syncTransferSnapshot(
 
   if (!callFailed && snapshot && snapshot.transferID === transferID) {
     const reconciled = tracker.reconcileSnapshot(transferID, snapshot)
-    return { update: reconciled, trackingLost: false, failureCount: 0 }
+    if (reconciled !== undefined) {
+      return { update: reconciled, trackingLost: false, failureCount: 0 }
+    }
+    const currentFailures = tracker.snapshotFailures()
+    return {
+      update: undefined,
+      trackingLost: currentFailures >= maxRetries,
+      failureCount: currentFailures,
+    }
   }
 
   const { failureCount, trackingLost } = tracker.recordSnapshotFailure(transferID, maxRetries)
-  return { update: tracker.current(), trackingLost, failureCount }
+  return { update: undefined, trackingLost, failureCount }
+}
+
+export function canToggleMockMode(pending: boolean, state: TransferState): boolean {
+  return !pending && !isRunning(state)
 }
 
 export function isRunning(state: TransferState): boolean {
