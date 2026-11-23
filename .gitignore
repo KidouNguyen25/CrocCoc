@@ -1,10 +1,13 @@
 /frontend/node_modules/
 /frontend/dist/
 /frontend/wailsjs/
+/frontend/package.json.md5
 /build/bin/
 /release/
 /build/appicon.png
 /build/windows/icon.ico
+/build/windows/info.json
+/build/windows/wails.exe.manifest
 /build/windows/installer/output/
 /bin/
 **.tmp/
