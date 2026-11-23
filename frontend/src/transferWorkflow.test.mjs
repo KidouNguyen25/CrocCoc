@@ -237,6 +237,71 @@ test('an explicit null snapshot means backend no longer tracks the session, not 
   assert.equal(tracker.snapshotFailures(), 0)
 })
 
+test('backendMissing vs IPC failure distinguishes live event race, recovery, and reset guard', async () => {
+  const {
+    createTransferSessionTracker,
+    syncTransferSnapshot,
+    MAX_SNAPSHOT_RETRIES,
+  } = await import('./transfer.ts')
+
+  const tracker = createTransferSessionTracker()
+  tracker.beginStart()
+  tracker.resolveStart('send-race-1')
+
+  // 1. Live native event arriving while a null snapshot RPC is in flight wins over stale null.
+  const raceResult = await syncTransferSnapshot(tracker, {
+    getTransferSnapshot: async () => {
+      tracker.onEvent({
+        transferID: 'send-race-1',
+        revision: 2,
+        state: 'WAITING_FOR_PEER',
+        connectionCode: 'live-code',
+      })
+      return null
+    },
+  }, 'send-race-1', MAX_SNAPSHOT_RETRIES)
+  assert.equal(raceResult.backendMissing, undefined)
+  assert.equal(raceResult.trackingLost, false)
+  assert.equal(raceResult.failureCount, 0)
+  assert.equal(raceResult.update?.state, 'WAITING_FOR_PEER')
+  assert.equal(raceResult.update?.connectionCode, 'live-code')
+
+  // 2. One IPC error increments failureCount without setting backendMissing;
+  // a subsequent explicit null snapshot sets backendMissing without incrementing failureCount.
+  const ipcFail = await syncTransferSnapshot(tracker, {
+    getTransferSnapshot: async () => {
+      throw new Error('IPC bridge error')
+    },
+  }, 'send-race-1', MAX_SNAPSHOT_RETRIES)
+  assert.equal(ipcFail.backendMissing, undefined)
+  assert.equal(ipcFail.trackingLost, false)
+  assert.equal(ipcFail.failureCount, 1)
+
+  const missingRes = await syncTransferSnapshot(tracker, {
+    getTransferSnapshot: async () => null,
+  }, 'send-race-1', MAX_SNAPSHOT_RETRIES)
+  assert.equal(missingRes.backendMissing, true)
+  assert.equal(missingRes.trackingLost, true)
+  assert.equal(missingRes.failureCount, 1)
+  assert.equal(tracker.snapshotFailures(), 1)
+
+  // 3. Reset guard: if tracker is reset while a snapshot probe is in flight,
+  // the late probe response is ignored and cannot mark trackingLost or backendMissing.
+  tracker.beginStart()
+  tracker.resolveStart('send-reset-guard')
+  const afterReset = await syncTransferSnapshot(tracker, {
+    getTransferSnapshot: async () => {
+      tracker.reset()
+      return null
+    },
+  }, 'send-reset-guard', MAX_SNAPSHOT_RETRIES)
+  assert.equal(afterReset.update, undefined)
+  assert.equal(afterReset.backendMissing, undefined)
+  assert.equal(afterReset.trackingLost, false)
+  assert.equal(afterReset.failureCount, 0)
+  assert.equal(tracker.current(), undefined)
+})
+
 test('stale or duplicate native events cannot erase snapshot failure streak', async () => {
   const { createTransferSessionTracker, syncTransferSnapshot } = await import('./transfer.ts')
   const tracker = createTransferSessionTracker()
