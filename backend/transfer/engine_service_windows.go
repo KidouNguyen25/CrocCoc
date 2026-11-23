@@ -39,25 +39,25 @@ func manifestTotalBytes(entries []ManifestEntry) int64 {
 }
 
 type engineService struct {
-	cfg             EngineServiceConfig
-	worker          *WorkerClient
-	workerPin       *SendSourceLease
-	recoveryErr     error
-	coordinator     Coordinator
-	shutdownTimeout time.Duration
+	cfg		EngineServiceConfig
+	worker		*WorkerClient
+	workerPin	*SendSourceLease
+	recoveryErr	error
+	coordinator	Coordinator
+	shutdownTimeout	time.Duration
 
-	mu                    sync.Mutex
-	shuttingDown          bool
-	shutdownDone          chan struct{}
-	preflightContext      context.Context
-	cancelPreflights      context.CancelFunc
-	preflightCount        int
-	preflightDone         chan struct{}
-	sessions              map[string]*engineSession
-	sendCode              map[string]string
-	lastProgressID        string
-	lastBytesTransferred  int64
-	lastBytesTotal        int64
+	mu			sync.Mutex
+	shuttingDown		bool
+	shutdownDone		chan struct{}
+	preflightContext	context.Context
+	cancelPreflights	context.CancelFunc
+	preflightCount		int
+	preflightDone		chan struct{}
+	sessions		map[string]*engineSession
+	sendCode		map[string]string
+	lastProgressID		string
+	lastBytesTransferred	int64
+	lastBytesTotal		int64
 }
 
 // NewEngineService creates the Windows backend. It reports unavailable until
