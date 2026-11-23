@@ -272,14 +272,30 @@ func (s *engineService) StartReceive(code, outputDir string) (string, error) {
 	if strings.TrimSpace(code) == "" || strings.ContainsAny(code, "\r\n\x00") || outputDir == "" {
 		return "", ErrInvalidInput
 	}
-	preparationStarted := time.Now()
-	if err := CheckReceiveDestinationEligibility(outputDir); err != nil {
-		return "", err
-	}
-	if errors.Is(preparationCtx.Err(), context.Canceled) {
-		return "", ErrWorkerUnavailable
-	}
-	if errors.Is(preparationCtx.Err(), context.DeadlineExceeded) || time.Since(preparationStarted) >= PreparationTimeout {
+	// Windows directory probes use synchronous filesystem APIs that may block
+	// inside the OS. Keep them off the StartReceive goroutine so Shutdown can
+	// cancel this admitted preflight immediately without waiting for a hung
+	// volume/handle query. The detached probe is read-only and owns/closes its
+	// own temporary destination lease; it cannot register a session or publish.
+	eligibilityDone := make(chan error, 1)
+	go func() {
+		eligibilityDone <- CheckReceiveDestinationEligibility(outputDir)
+	}()
+	select {
+	case checkErr := <-eligibilityDone:
+		if err := preparationCtx.Err(); err != nil {
+			if errors.Is(err, context.Canceled) {
+				return "", ErrWorkerUnavailable
+			}
+			return "", ErrPreparationTimeout
+		}
+		if checkErr != nil {
+			return "", checkErr
+		}
+	case <-preparationCtx.Done():
+		if errors.Is(preparationCtx.Err(), context.Canceled) {
+			return "", ErrWorkerUnavailable
+		}
 		return "", ErrPreparationTimeout
 	}
 	s.mu.Lock()
