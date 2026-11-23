@@ -131,7 +131,7 @@ export function App() {
         setTrackingLost(true)
         setBackendMissing(true)
         setForceResetAvailable(true)
-        setTrackingError('Backend không còn lưu phiên này. Có thể đặt lại giao diện mà không cần hủy phiên.')
+        setTrackingError('Backend không còn lưu phiên này; chưa xác định truyền thành công hay thất bại. Hãy kiểm tra thư mục gửi/nhận trước khi đặt lại giao diện.')
         return { lost: true, backendMissing: true }
       }
       if (result.trackingLost) {
@@ -356,13 +356,15 @@ export function App() {
                   >
                     Thử đồng bộ lại
                   </button>
-                  <button
-                    type="button"
-                    className="btn-secondary btn-alert-action"
-                    onClick={() => void handleCancelLostTransfer()}
-                  >
-                    Yêu cầu hủy phiên
-                  </button>
+                  {!backendMissing && (
+                    <button
+                      type="button"
+                      className="btn-secondary btn-alert-action"
+                      onClick={() => void handleCancelLostTransfer()}
+                    >
+                      Yêu cầu hủy phiên
+                    </button>
+                  )}
                   {forceResetAvailable && (
                     <>
                       <button
