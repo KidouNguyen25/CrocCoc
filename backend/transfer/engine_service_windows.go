@@ -48,6 +48,9 @@ type engineService struct {
 
 	mu                    sync.Mutex
 	shuttingDown          bool
+	shutdownDone          chan struct{}
+	preflightContext      context.Context
+	cancelPreflights      context.CancelFunc
 	preflightCount        int
 	preflightDone         chan struct{}
 	sessions              map[string]*engineSession
@@ -90,23 +93,27 @@ func (s *engineService) GetCrocInfo() CrocInfo {
 // Preflight is admitted under the same lock as Shutdown's lifecycle latch.
 // The drain channel prevents Shutdown from releasing the pinned executable
 // while an admitted Start* is still inspecting sources/destinations.
-func (s *engineService) beginPreflight() error {
+func (s *engineService) beginPreflight() (context.Context, context.CancelFunc, error) {
 	if s == nil {
-		return ErrWorkerUnavailable
+		return nil, nil, ErrWorkerUnavailable
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.recoveryErr != nil {
-		return s.recoveryErr
+		return nil, nil, s.recoveryErr
 	}
 	if s.shuttingDown || s.worker == nil || s.workerPin == nil || s.cfg.RelayAddress == "" || s.cfg.RelayPassword == "" {
-		return ErrWorkerUnavailable
+		return nil, nil, ErrWorkerUnavailable
 	}
 	if s.preflightCount == 0 {
 		s.preflightDone = make(chan struct{})
 	}
+	if s.preflightContext == nil {
+		s.preflightContext, s.cancelPreflights = context.WithCancel(context.Background())
+	}
 	s.preflightCount++
-	return nil
+	ctx, cancel := context.WithTimeout(s.preflightContext, PreparationTimeout)
+	return ctx, cancel, nil
 }
 
 func (s *engineService) endPreflight() {
@@ -120,26 +127,36 @@ func (s *engineService) endPreflight() {
 }
 
 func (s *engineService) StartSend(paths []string) (string, error) {
-	if err := s.beginPreflight(); err != nil {
+	preparationCtx, preparationCancel, err := s.beginPreflight()
+	if err != nil {
 		return "", err
 	}
-	defer s.endPreflight()
-	preparationCtx, preparationCancel := context.WithTimeout(context.Background(), PreparationTimeout)
 	defer preparationCancel()
+	defer s.endPreflight()
 	sources, manifest, err := AcquireSendSourceLeaseContext(preparationCtx, paths)
 	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
+		if errors.Is(preparationCtx.Err(), context.Canceled) {
+			return "", ErrWorkerUnavailable
+		}
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(preparationCtx.Err(), context.DeadlineExceeded) {
 			return "", ErrPreparationTimeout
 		}
 		return "", err
+	}
+	if errors.Is(preparationCtx.Err(), context.Canceled) {
+		_ = sources.Close()
+		return "", ErrWorkerUnavailable
 	}
 	digest, err := SendManifestDigest(manifest)
 	if err != nil {
 		_ = sources.Close()
 		return "", err
 	}
-	if errors.Is(preparationCtx.Err(), context.DeadlineExceeded) {
+	if err := preparationCtx.Err(); err != nil {
 		_ = sources.Close()
+		if errors.Is(err, context.Canceled) {
+			return "", ErrWorkerUnavailable
+		}
 		return "", ErrPreparationTimeout
 	}
 	code, err := newConnectionCode()
@@ -147,8 +164,11 @@ func (s *engineService) StartSend(paths []string) (string, error) {
 		_ = sources.Close()
 		return "", err
 	}
-	if errors.Is(preparationCtx.Err(), context.DeadlineExceeded) {
+	if err := preparationCtx.Err(); err != nil {
 		_ = sources.Close()
+		if errors.Is(err, context.Canceled) {
+			return "", ErrWorkerUnavailable
+		}
 		return "", ErrPreparationTimeout
 	}
 	// Begin/registration is atomic with Shutdown's admission latch. If
@@ -243,9 +263,11 @@ func (s *engineService) markSendTransferring(id string) {
 }
 
 func (s *engineService) StartReceive(code, outputDir string) (string, error) {
-	if err := s.beginPreflight(); err != nil {
+	preparationCtx, preparationCancel, err := s.beginPreflight()
+	if err != nil {
 		return "", err
 	}
+	defer preparationCancel()
 	defer s.endPreflight()
 	if strings.TrimSpace(code) == "" || strings.ContainsAny(code, "\r\n\x00") || outputDir == "" {
 		return "", ErrInvalidInput
@@ -254,7 +276,10 @@ func (s *engineService) StartReceive(code, outputDir string) (string, error) {
 	if err := CheckReceiveDestinationEligibility(outputDir); err != nil {
 		return "", err
 	}
-	if time.Since(preparationStarted) >= PreparationTimeout {
+	if errors.Is(preparationCtx.Err(), context.Canceled) {
+		return "", ErrWorkerUnavailable
+	}
+	if errors.Is(preparationCtx.Err(), context.DeadlineExceeded) || time.Since(preparationStarted) >= PreparationTimeout {
 		return "", ErrPreparationTimeout
 	}
 	s.mu.Lock()
@@ -520,10 +545,20 @@ func (s *engineService) Shutdown() {
 	}
 	s.mu.Lock()
 	if s.shuttingDown {
+		done := s.shutdownDone
 		s.mu.Unlock()
+		// Every caller observes the same bounded shutdown attempt. Completion
+		// of this channel means Shutdown returned, NOT that a timed-out worker
+		// was killed or a retained executable pin was released.
+		if done != nil {
+			<-done
+		}
 		return
 	}
 	s.shuttingDown = true
+	s.shutdownDone = make(chan struct{})
+	shutdownDone := s.shutdownDone
+	cancelPreflights := s.cancelPreflights
 	preflightDone := s.preflightDone
 	ids := make([]string, 0, len(s.sessions))
 	waitChans := make([]<-chan struct{}, 0, len(s.sessions))
@@ -534,7 +569,12 @@ func (s *engineService) Shutdown() {
 		}
 	}
 	s.mu.Unlock()
-
+	defer close(shutdownDone)
+	// Stop admitted filesystem preflights immediately; they still need to
+	// release their leases and signal preflightDone before the pin may close.
+	if cancelPreflights != nil {
+		cancelPreflights()
+	}
 	for _, id := range ids {
 		_, _ = s.CancelTransfer(id)
 	}
