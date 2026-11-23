@@ -29,7 +29,8 @@ $gitSha = (& git rev-parse HEAD).Trim()
 $dirty = (& git status --porcelain)
 if ($dirty -and -not $AllowDirty) { throw "Cây làm việc chưa sạch. Commit hoặc dùng -AllowDirty (bản này sẽ không được nghiệm thu)." }
 
-$wailsVersionLine = (& wails version) | Select-Object -Last 1
+$wailsVersionOutput = ((& wails version) -join "`n")
+$wailsVersionLine = [regex]::Match($wailsVersionOutput, '(?m)^v[0-9]+\.[0-9]+\.[0-9]+[^\r\n]*$').Value.Trim()
 $wailsPin = [regex]::Match((Get-Content -Raw (Join-Path $repoRoot "go.mod")), '(?m)^\s*(?:require\s+)?github\.com/wailsapp/wails/v2\s+(v[0-9]+\.[0-9]+\.[0-9]+)').Groups[1].Value
 if (-not $wailsPin -or $wailsVersionLine -notmatch [regex]::Escape($wailsPin)) {
     throw "Wails CLI cần khớp phiên bản trong go.mod ($wailsPin), đang có: $wailsVersionLine"
