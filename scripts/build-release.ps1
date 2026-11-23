@@ -8,7 +8,8 @@
 #>
 param(
     [switch]$AllowDirty,
-    [switch]$SkipTests
+    [switch]$SkipTests,
+    [string]$PackageVersion = ""
 )
 $ErrorActionPreference = "Stop"
 
@@ -40,6 +41,7 @@ $nodeVersion = (& node --version)
 
 $wailsConfig = Get-Content -Raw (Join-Path $repoRoot "wails.json") | ConvertFrom-Json
 $appVersion = $wailsConfig.info.productVersion
+$releaseVersion = if ($PackageVersion.Trim()) { $PackageVersion.Trim() } else { $appVersion }
 
 # 2. Frontend.
 Invoke-Native npm @("--prefix", "frontend", "ci")
@@ -70,7 +72,7 @@ $exe = Join-Path $repoRoot "build\bin\CrocCoc.exe"
 if (-not (Test-Path -LiteralPath $exe)) { throw "Không thấy build\bin\CrocCoc.exe sau khi build." }
 
 # 6. Xếp gói: CrocCoc.exe cạnh bin\croccoc-engine.exe (main.go tìm worker ở đúng vị trí này).
-$packageName = "CrocCoc-$appVersion-win64"
+$packageName = "CrocCoc-$releaseVersion-win64"
 $releaseRoot = Join-Path $repoRoot "release"
 $stage = Join-Path $releaseRoot $packageName
 if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
@@ -83,7 +85,7 @@ Copy-Item -LiteralPath (Join-Path $repoRoot "docs\release-readme.txt") -Destinat
 if ((Get-Sha256 (Join-Path $stage "bin\croccoc-engine.exe")) -ne $pin) { throw "Worker trong gói không khớp hash ghim." }
 
 # SBOM từ chính 2 executable Go đã build và dependency graph frontend.
-Invoke-Native node @("scripts/qa/generate-go-sbom.mjs", $stage, $appVersion)
+Invoke-Native node @("scripts/qa/generate-go-sbom.mjs", $stage, $releaseVersion)
 $frontendSbom = & npm --prefix frontend sbom --sbom-format=cyclonedx --sbom-type=application
 if ($LASTEXITCODE -ne 0 -or -not $frontendSbom) { throw "Không tạo được CycloneDX SBOM frontend." }
 $frontendSbomJson = $frontendSbom -join [Environment]::NewLine
@@ -106,6 +108,7 @@ if (-not $crocVersion -or -not $upstreamCommit) { throw "Không đọc được 
 [pscustomobject]@{
     package        = $packageName
     appVersion     = $appVersion
+    releaseVersion = $releaseVersion
     gitSha         = $gitSha
     sourceDirty    = [bool]$dirty
     qualityGatesSkipped = [bool]$SkipTests
