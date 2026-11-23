@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Build gói Windows x64 của CrocCoc (CC-07): kiểm thử, build worker đã ghim, build Wails,
   xếp gói, tính SHA-256 và ghi release-manifest.json.
@@ -77,6 +77,8 @@ New-Item -ItemType Directory -Path (Join-Path $stage "bin") -Force | Out-Null
 Copy-Item -LiteralPath $exe -Destination (Join-Path $stage "CrocCoc.exe")
 Copy-Item -LiteralPath $workerBuilt -Destination (Join-Path $stage "bin\croccoc-engine.exe")
 Copy-Item -LiteralPath (Join-Path $repoRoot "LICENSE") -Destination (Join-Path $stage "LICENSE")
+Copy-Item -LiteralPath (Join-Path $repoRoot "THIRD_PARTY_LICENSES.txt") -Destination (Join-Path $stage "THIRD_PARTY_LICENSES.txt")
+Copy-Item -LiteralPath (Join-Path $repoRoot "docs\release-readme.txt") -Destination (Join-Path $stage "README.txt")
 if ((Get-Sha256 (Join-Path $stage "bin\croccoc-engine.exe")) -ne $pin) { throw "Worker trong gói không khớp hash ghim." }
 
 # SBOM từ chính 2 executable Go đã build và dependency graph frontend.
