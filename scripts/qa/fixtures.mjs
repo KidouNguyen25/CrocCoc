@@ -75,11 +75,11 @@ async function make(dir, largeMb) {
   if (existing.length > 0) throw new Error(`Thư mục ${dir} không trống; dùng thư mục mới.`);
   await writeFile(path.join(dir, "small.txt"), "CrocCoc fixture\nxin chào\n", "utf8");
   const tree = path.join(dir, "Thư mục thử nghiệm");
-  await mkdir(path.join(tree, "con", "cháu"), { recursive: true });
+  await mkdir(path.join(tree, "nhánh-con", "cháu"), { recursive: true });
   await mkdir(path.join(tree, "thư mục rỗng"), { recursive: true });
   await writeFile(path.join(tree, "tệp có khoảng trắng.txt"), "nội dung 1\n", "utf8");
-  await writeFile(path.join(tree, "con", "dữ liệu.bin"), Buffer.from(Array.from({ length: 4096 }, (_, i) => i % 251)));
-  await writeFile(path.join(tree, "con", "cháu", "ghi-chú.md"), "# ghi chú\n", "utf8");
+  await writeFile(path.join(tree, "nhánh-con", "dữ liệu.bin"), Buffer.from(Array.from({ length: 4096 }, (_, i) => i % 251)));
+  await writeFile(path.join(tree, "nhánh-con", "cháu", "ghi-chú.md"), "# ghi chú\n", "utf8");
   if (largeMb > 0) await writeLargeFile(path.join(dir, "large.bin"), largeMb);
   const manifest = await walk(dir);
   await writeFile(path.join(dir, "..", `${path.basename(dir)}.manifest.json`), JSON.stringify(manifest, null, 2));
