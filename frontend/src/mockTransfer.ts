@@ -40,7 +40,11 @@ export function createMockTransferClient(schedule: Schedule = scheduleAfter): Tr
   }
 
   return {
-    getCrocInfo: async () => ({ available: false, message: 'Đang dùng dịch vụ mô phỏng.' }),
+    getCrocInfo: async () => ({
+      available: false,
+      relayLabel: 'Relay mô phỏng (cục bộ)',
+      message: 'Đang dùng dịch vụ mô phỏng.',
+    }),
     startSend: async (paths) => {
       if (paths.length === 0 || paths.some((path) => !path.trim())) {
         throw new Error('Cần ít nhất một đường dẫn mẫu hợp lệ.')

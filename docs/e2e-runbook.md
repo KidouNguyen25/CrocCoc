@@ -6,7 +6,9 @@ Tài liệu thao tác cho [V&V](verification.md) CC-T-11 đến CC-T-16. Ghi k�
 
 1. Build gói: `scripts\build-release.ps1` (máy Windows x64). Ghi SHA-256 của `CrocCoc-<ver>-win64.zip` và `git SHA` trong `release-manifest.json`.
 2. Hai máy Windows 10/11 x64 có WebView2. Giải nén gói vào thư mục mới, giữ `CrocCoc.exe` cạnh `bin\croccoc-engine.exe`. Không cần đặt `CROCCOC_WORKER_PATH`.
-3. **Bắt buộc cấu hình relay trên cả hai máy trước khi mở EXE.** Host chỉ báo engine khả dụng nếu `CROCCOC_RELAY_ADDRESS` (dạng `host:port`) và `CROCCOC_RELAY_PASSWORD` đều khác rỗng. Dùng cùng thông tin relay đã cấp phép trên hai máy; mật khẩu relay khác mã kết nối truyền. Mở PowerShell **tại thư mục vừa giải nén**, chạy các lệnh sau và luôn khởi chạy ứng dụng từ phiên PowerShell này:
+3. **Cấu hình relay (mặc định tự động hoặc ghi đè fail-closed):**
+   - **Chế độ mặc định (không đặt biến môi trường):** mở trực tiếp `CrocCoc.exe`. Host tự dùng relay công cộng chính thức của Croc v11.6.4 (`croc.schollz.com:9009`) và hiển thị nhãn `Relay công cộng: croc.schollz.com:9009`. Lưu ý relay công cộng bên thứ ba có thể chậm, quá tải hoặc bị tường lửa mạng công ty chặn cổng TCP `9009–9013`.
+   - **Chế độ relay tùy chỉnh (tự dựng relay riêng):** phải đặt **đủ cả hai** biến `CROCCOC_RELAY_ADDRESS` (`host:port`) và `CROCCOC_RELAY_PASSWORD` trên cả hai máy trước khi mở `CrocCoc.exe` (UI sẽ hiển thị `Relay tùy chỉnh`). Nếu chỉ đặt 1 trong 2 biến, host phải từ chối fail-closed với `ENGINE_UNAVAILABLE` (không rơi ngầm về relay công cộng). Mở PowerShell **tại thư mục vừa giải nén** khi muốn thử relay tùy chỉnh:
 
 ```powershell
 $env:CROCCOC_RELAY_ADDRESS = Read-Host 'Địa chỉ relay (host:port)'
@@ -21,7 +23,7 @@ finally {
 }
 ```
 
-Không ghi mật khẩu thật trong command line, file `.env`, transcript, log, ảnh hay hồ sơ QA. Tránh bật PowerShell transcription khi nhập credential; không chụp cửa sổ có thông tin nhạy cảm. Nếu thiếu relay/password, `ENGINE_UNAVAILABLE` là hành vi **đúng** (fail-closed), không phải lỗi pin worker.
+Không ghi mật khẩu relay riêng trong command line, file `.env`, transcript, log, ảnh hay hồ sơ QA. Tránh bật PowerShell transcription khi nhập credential; không chụp cửa sổ có thông tin nhạy cảm. Nếu chỉ đặt 1 trong 2 biến relay, `ENGINE_UNAVAILABLE` là hành vi **đúng** (fail-closed), không phải lỗi pin worker.
 4. Trên máy gửi tạo fixture (Node 24+ ở máy phát triển, không cần cài trên máy demo nếu copy sẵn fixture):
 
 ```powershell
@@ -44,7 +46,7 @@ Kết luận `PASS` khi mọi tệp nguồn có mặt với cùng kích thước
 
 | Ca | Thao tác | Ghi lại |
 | --- | --- | --- |
-| CC-T-11 | Cấu hình hai biến relay theo bước 3 trên cả hai máy rồi mới mở `CrocCoc.exe` từ PowerShell. Đọc trạng thái Croc. Thử mở thiếu relay/password (phải fail-closed), đổi tên `bin\croccoc-engine.exe`, rồi thay bằng bản bị sửa một byte; khôi phục bản gốc và cấu hình relay trước khi thử lại. | Có relay hợp lệ + đúng worker pin thì khả dụng; thiếu relay, thiếu worker hoặc sai hash thì không khả dụng. Không lưu relay password hay mã kết nối trong bằng chứng. |
+| CC-T-11 | Mở trực tiếp `CrocCoc.exe` không đặt biến môi trường (kiểm tra dùng `Relay công cộng: croc.schollz.com:9009`), thử đặt đủ cặp biến relay tùy chỉnh (`Relay tùy chỉnh`), thử chỉ đặt 1 trong 2 biến (phải fail-closed `ENGINE_UNAVAILABLE`), đổi tên `bin\croccoc-engine.exe`, rồi thay bằng bản bị sửa một byte; khôi phục bản gốc trước khi thử lại. | Không đặt biến hoặc đặt đủ cặp + đúng worker pin thì khả dụng; đặt thiếu 1 biến relay, thiếu worker hoặc sai hash thì không khả dụng. Không lưu relay password hay mã kết nối trong bằng chứng. |
 | CC-T-12 | Gửi `small.txt`, rồi gửi cả `Thư mục thử nghiệm` kèm `small.txt`, bỏ `small.txt` trước khi gửi, nhận bằng mã. Kiểm thư mục kết quả bằng Explorer (nút mở thư mục từ app chưa có trong MVP). | Ảnh đã che mã và kết quả `compare` cho từng lượt, dùng đích sạch riêng theo ca và đường dẫn nguồn/đích tương ứng. |
 | CC-T-13 | Hủy khi chờ người nhận và khi đang truyền ở cả hai vai. Mở phiên thứ hai khi phiên đầu còn chạy. Kiểm tra `Get-Process` không còn tiến trình con. | Dòng thời gian trạng thái, kết quả `Get-Process`. |
 | CC-T-14 | Nhập mã sai, chọn đích không ghi được, xóa nguồn giữa chừng, rút mạng giữa lúc truyền. Rà `%LOCALAPPDATA%`, thông báo UI và log để tìm mã kết nối. | Bước tái hiện, kết luận rà bí mật. |

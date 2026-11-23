@@ -84,10 +84,13 @@ func (s *engineService) GetCrocInfo() CrocInfo {
 	if s.recoveryErr != nil {
 		return CrocInfo{Available: false, Message: s.recoveryErr.Error()}
 	}
+	if s.cfg.RelayConfigErr != nil {
+		return CrocInfo{Available: false, Message: s.cfg.RelayConfigErr.Error()}
+	}
 	if s.shuttingDown || s.worker == nil || s.workerPin == nil || s.cfg.RelayAddress == "" || s.cfg.RelayPassword == "" {
 		return CrocInfo{Available: false, Message: ErrWorkerUnavailable.Error()}
 	}
-	return CrocInfo{Available: true, Version: PinnedCrocVersion}
+	return CrocInfo{Available: true, Version: PinnedCrocVersion, RelayLabel: s.cfg.RelayLabel}
 }
 
 // Preflight is admitted under the same lock as Shutdown's lifecycle latch.
@@ -101,6 +104,9 @@ func (s *engineService) beginPreflight() (context.Context, context.CancelFunc, e
 	defer s.mu.Unlock()
 	if s.recoveryErr != nil {
 		return nil, nil, s.recoveryErr
+	}
+	if s.cfg.RelayConfigErr != nil {
+		return nil, nil, s.cfg.RelayConfigErr
 	}
 	if s.shuttingDown || s.worker == nil || s.workerPin == nil || s.cfg.RelayAddress == "" || s.cfg.RelayPassword == "" {
 		return nil, nil, ErrWorkerUnavailable

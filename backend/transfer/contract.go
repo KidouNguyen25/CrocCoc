@@ -36,9 +36,10 @@ const (
 )
 
 type CrocInfo struct {
-	Available bool   `json:"available"`
-	Version   string `json:"version,omitempty"`
-	Message   string `json:"message,omitempty"`
+	Available  bool   `json:"available"`
+	Version    string `json:"version,omitempty"`
+	Message    string `json:"message,omitempty"`
+	RelayLabel string `json:"relayLabel,omitempty"`
 }
 
 type TransferError struct {

@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -108,6 +109,54 @@ func TestRecoveryPendingKeepsEngineUnavailable(t *testing.T) {
 	}
 	if _, err := service.StartReceive("code", "output"); !errors.Is(err, ErrRecoveryPending) {
 		t.Fatalf("receive ignored pending recovery: %v", err)
+	}
+}
+
+func TestGetCrocInfoIncludesRelayLabelWithoutPassword(t *testing.T) {
+	service := &engineService{
+		cfg: EngineServiceConfig{
+			RelayAddress:  "relay.example.test:9009",
+			RelayPassword: "private-password",
+			RelayLabel:    "Relay tùy chỉnh",
+		},
+		worker:    &WorkerClient{path: "worker.exe"},
+		workerPin: &SendSourceLease{},
+	}
+
+	info := service.GetCrocInfo()
+	if !info.Available || info.RelayLabel != "Relay tùy chỉnh" {
+		t.Fatalf("GetCrocInfo() = %+v, want available custom relay label", info)
+	}
+	encoded, err := json.Marshal(info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "private-password") || strings.Contains(string(encoded), "relayPassword") {
+		t.Fatalf("GetCrocInfo exposed relay credentials: %s", encoded)
+	}
+}
+
+func TestRelayConfigErrorDisablesEngineAndTransferStarts(t *testing.T) {
+	configErr := errors.New("ENGINE_UNAVAILABLE: cần đặt cả hai biến relay")
+	service := &engineService{cfg: EngineServiceConfig{RelayConfigErr: configErr}}
+
+	if info := service.GetCrocInfo(); info.Available || info.Message != configErr.Error() {
+		t.Fatalf("GetCrocInfo() = %+v, want relay configuration error", info)
+	}
+	if _, err := service.StartSend([]string{"source.txt"}); !errors.Is(err, configErr) {
+		t.Fatalf("StartSend() error = %v, want relay configuration error", err)
+	}
+	if _, err := service.StartReceive("code", "output"); !errors.Is(err, configErr) {
+		t.Fatalf("StartReceive() error = %v, want relay configuration error", err)
+	}
+}
+
+func TestRelayConnectionFailureHasActionableMessage(t *testing.T) {
+	err := workerStatusError("metadata_failed")
+	if !errors.Is(err, ErrRelayUnavailable) ||
+		!strings.Contains(err.Error(), "không tới được máy chủ relay") ||
+		!strings.Contains(err.Error(), "9009–9013") {
+		t.Fatalf("relay connection error = %v, want network and port guidance", err)
 	}
 }
 

@@ -19,6 +19,7 @@ export type TransferState =
 export interface CrocInfo {
   available: boolean
   version?: string
+  relayLabel?: string
   message?: string
 }
 

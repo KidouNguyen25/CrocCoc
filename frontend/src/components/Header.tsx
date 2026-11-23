@@ -12,6 +12,7 @@ export function Header({ hostTitle, crocInfo, isDesktop }: HeaderProps) {
   const crocLabel = isAvailable
     ? `Croc ${crocInfo?.version ?? 'Sẵn sàng'}`
     : crocInfo?.message ?? (isDesktop ? 'Chưa kết nối Croc' : 'Chế độ mô phỏng')
+  const relayLabel = crocInfo?.relayLabel
 
   return (
     <header className="masthead">
@@ -37,6 +38,14 @@ export function Header({ hostTitle, crocInfo, isDesktop }: HeaderProps) {
           <span className="pill-dot" />
           {crocLabel}
         </span>
+        {relayLabel && (
+          <span
+            className="tag"
+            title="Relay chỉ thấy metadata mạng (IP, thời điểm, lưu lượng), không đọc được nội dung tệp đã mã hóa PAKE"
+          >
+            {relayLabel}
+          </span>
+        )}
         <span className="tag" title={hostTitle}>
           {isDesktop ? 'Desktop App' : 'Bản xem trước'}
         </span>

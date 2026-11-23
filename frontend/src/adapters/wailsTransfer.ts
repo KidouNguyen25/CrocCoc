@@ -28,7 +28,15 @@ export function getDesktopClient(host: WailsHost = window as Window & WailsHost)
   if (!binding || !eventsOn) return undefined
 
   return {
-    getCrocInfo: () => binding.GetCrocInfo(),
+    getCrocInfo: async () => {
+      const info = await binding.GetCrocInfo()
+      return {
+        available: Boolean(info?.available),
+        ...(info?.version ? { version: info.version } : {}),
+        ...(info?.relayLabel ? { relayLabel: info.relayLabel } : {}),
+        ...(info?.message ? { message: info.message } : {}),
+      }
+    },
     startSend: (paths) => binding.StartSend(paths),
     startReceive: (code, outputDir) => binding.StartReceive(code, outputDir),
     cancelTransfer: (id) => binding.CancelTransfer(id),

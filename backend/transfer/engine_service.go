@@ -8,10 +8,12 @@ import (
 // EngineServiceConfig supplies non-secret engine location and relay settings.
 // Transfer credentials travel only through the private worker pipe.
 type EngineServiceConfig struct {
-	WorkerPath    string
-	RelayAddress  string
-	RelayPassword string
-	EventSink     func(Update)
+	WorkerPath     string
+	RelayAddress   string
+	RelayPassword  string
+	RelayLabel     string
+	RelayConfigErr error
+	EventSink      func(Update)
 }
 
 // EngineController extends the bootstrap Service with receive consent and

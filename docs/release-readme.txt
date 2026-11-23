@@ -17,38 +17,55 @@ chỉ nạp worker tại đúng đường dẫn tương đối "bin\croccoc-engi
 CrocCoc.exe (hoặc đường dẫn tuyệt đối do bạn chỉ định qua CROCCOC_WORKER_PATH)
 và luôn xác minh mã băm SHA-256 trước khi chạy.
 
-2. Yêu cầu hệ thống
--------------------
-- Windows 10 hoặc Windows 11 (64-bit / x64).
-- Microsoft Edge WebView2 Evergreen Runtime (thường có sẵn trên Windows 10/11).
+2. Yêu cầu hệ thống & Khởi chạy nhanh
+-------------------------------------
+- Windows 10 hoặc Windows 11 (64-bit / x64) có Microsoft Edge WebView2 Evergreen Runtime.
+- Mặc định, bạn chỉ cần giải nén gói và mở trực tiếp CrocCoc.exe để sử dụng ngay:
+  ứng dụng được cấu hình sẵn tuyến relay công cộng chính thức của Croc v11.6.4
+  ("croc.schollz.com:9009" với mật khẩu công khai mặc định của upstream Croc).
+- Giao diện sẽ hiển thị rõ nhãn tuyến đang dùng:
+  "Relay công cộng: croc.schollz.com:9009" (hoặc "Relay tùy chỉnh" nếu bạn đặt
+  relay riêng theo mục 3 bên dưới).
 
-3. Cấu hình máy chủ Relay trước khi chạy (BẮT BUỘC)
----------------------------------------------------
-Vì lý do bảo mật, CrocCoc không nhúng sẵn địa chỉ hay mật khẩu máy chủ relay vào
-mã nguồn hoặc gói phát hành. Bạn cần đặt hai biến môi trường sau trước khi mở
-CrocCoc.exe; nếu thiếu một trong hai biến, ứng dụng sẽ báo Engine chưa sẵn sàng:
+3. Lưu ý quyền riêng tư, giới hạn Relay công cộng & Tự dựng Relay riêng
+-----------------------------------------------------------------------
+- Quyền riêng tư: Nội dung tệp được mã hóa đầu cuối theo giao thức Croc PAKE
+  ngay từ máy gửi đến máy nhận. Máy chủ relay chỉ quan sát được metadata mạng
+  (địa chỉ IP, thời điểm, dung lượng truyền) và KHÔNG đọc được nội dung tệp.
+- Giới hạn của relay công cộng bên thứ ba ("croc.schollz.com:9009"):
+  + Đây là hạ tầng công cộng của bên thứ ba nên tốc độ có thể chậm hoặc quá tải
+    vào giờ cao điểm.
+  + Croc sử dụng kết nối TCP trên cổng 9009 (và các cổng dữ liệu phụ 9010–9013),
+    do đó tường lửa mạng công ty, trường học hoặc VPN hạn chế cổng TCP lạ có thể
+    chặn kết nối tới relay. Khi không kết nối được, ứng dụng sẽ thông báo rõ lỗi
+    không tới được máy chủ relay.
+- Cách tự dựng máy chủ Relay riêng và ghi đè cấu hình (Fail-Closed):
+  + Bạn có thể tự vận hành relay Croc trên máy chủ/VPS riêng có mở cổng TCP
+    9009–9013 (ví dụ: croc relay --ports 9009,9010,9011,9012,9013 --pass "<mật-khẩu-riêng>").
+  + Để dùng relay riêng, hãy đặt ĐỦ CẢ HAI biến môi trường sau trước khi mở
+    CrocCoc.exe:
+      * CROCCOC_RELAY_ADDRESS  : Địa chỉ máy chủ relay (ví dụ "relay.example.com:9009").
+      * CROCCOC_RELAY_PASSWORD : Mật khẩu kết nối máy chủ relay của bạn.
 
-- CROCCOC_RELAY_ADDRESS  : Địa chỉ máy chủ relay Croc (ví dụ "relay.example.com:9009" hoặc "127.0.0.1:9009").
-- CROCCOC_RELAY_PASSWORD : Mật khẩu kết nối máy chủ relay của bạn.
+    Ví dụ khởi chạy với relay riêng từ Windows PowerShell:
 
-Cách chạy từ Windows PowerShell:
+      $env:CROCCOC_RELAY_ADDRESS = "<địa-chỉ-relay:cổng>"
+      $env:CROCCOC_RELAY_PASSWORD = "<mật-khẩu-relay-của-bạn>"
+      .\CrocCoc.exe
 
-    $env:CROCCOC_RELAY_ADDRESS = "<địa-chỉ-relay:cổng>"
-    $env:CROCCOC_RELAY_PASSWORD = "<mật-khẩu-relay-của-bạn>"
-    .\CrocCoc.exe
-
-(Nếu muốn đặt cố định cho tài khoản người dùng Windows hiện tại, bạn có thể mở
-System Properties -> Environment Variables -> User variables để thêm hai biến
-CROCCOC_RELAY_ADDRESS và CROCCOC_RELAY_PASSWORD, sau đó mở lại CrocCoc.exe).
-
-Khi khởi động, CrocCoc.exe đọc CROCCOC_RELAY_PASSWORD vào bộ nhớ rồi xóa ngay
-biến này khỏi môi trường tiến trình chính, và chỉ truyền cho tiến trình con
-bin\croccoc-engine.exe trong phạm vi tối thiểu khi thực hiện phiên gửi/nhận.
+  + Cơ chế bảo vệ Fail-Closed:
+      * Không đặt cả hai biến -> Dùng relay công cộng mặc định ("croc.schollz.com:9009").
+      * Đặt đủ cả hai biến    -> Dùng relay tùy chỉnh của bạn ("Relay tùy chỉnh").
+      * Chỉ đặt 1 trong 2 biến (thiếu địa chỉ hoặc thiếu mật khẩu) -> Ứng dụng
+        từ chối khởi tạo engine (ENGINE_UNAVAILABLE) kèm thông báo lỗi rõ ràng,
+        tuyệt đối không lẳng lặng rơi về relay công cộng khi bạn cấu hình dở.
+  + Khi khởi động, CrocCoc.exe đọc CROCCOC_RELAY_PASSWORD vào bộ nhớ rồi xóa ngay
+    biến này khỏi môi trường tiến trình chính, và chỉ truyền cho tiến trình con
+    bin\croccoc-engine.exe trong danh sách biến môi trường tối thiểu.
 
 4. Kiểm tra toàn vẹn gói & Lưu ý bản Pre-release MVP
 ----------------------------------------------------
-- Bạn có thể kiểm tra mã băm SHA-256 của các tệp bằng PowerShell và đối chiếu
-  với SHA256SUMS.txt:
+- Kiểm tra mã băm SHA-256 của các tệp bằng PowerShell và đối chiếu với SHA256SUMS.txt:
 
     Get-FileHash .\CrocCoc.exe, .\bin\croccoc-engine.exe -Algorithm SHA256
 

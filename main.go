@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"embed"
+	"errors"
 	"log"
 	"os"
 	"path/filepath"
@@ -19,6 +20,12 @@ import (
 var assets embed.FS
 
 const singleInstanceUUID = "8f94d7c2-6b3e-4d1a-9c52-7e3a1b4f8c90"
+
+const (
+	// The upstream public Croc relay uses a public password; it is not a secret.
+	defaultPublicRelayAddress  = "croc.schollz.com:9009"
+	defaultPublicRelayPassword = "pass123"
+)
 
 func main() {
 	app := newApp(transfer.NewUnavailableService())
@@ -71,15 +78,31 @@ func resolveWorkerPath() string {
 	return path
 }
 
+func resolveRelayConfig() (address, password, label string, configErr error) {
+	address, addressSet := os.LookupEnv("CROCCOC_RELAY_ADDRESS")
+	password, passwordSet := os.LookupEnv("CROCCOC_RELAY_PASSWORD")
+	address = strings.TrimSpace(address)
+	switch {
+	case !addressSet && !passwordSet:
+		return defaultPublicRelayAddress, defaultPublicRelayPassword,
+			"Relay công cộng: " + defaultPublicRelayAddress, nil
+	case addressSet && passwordSet && address != "" && strings.TrimSpace(password) != "":
+		return address, password, "Relay tùy chỉnh", nil
+	default:
+		return "", "", "", errors.New("ENGINE_UNAVAILABLE: cần đặt cả CROCCOC_RELAY_ADDRESS và CROCCOC_RELAY_PASSWORD, hoặc bỏ trống cả hai")
+	}
+}
+
 func engineServiceConfig(eventSink func(transfer.Update)) transfer.EngineServiceConfig {
 	workerPath := resolveWorkerPath()
-	relayAddress := strings.TrimSpace(os.Getenv("CROCCOC_RELAY_ADDRESS"))
-	relayPassword := os.Getenv("CROCCOC_RELAY_PASSWORD")
+	relayAddress, relayPassword, relayLabel, relayConfigErr := resolveRelayConfig()
 	_ = os.Unsetenv("CROCCOC_RELAY_PASSWORD")
 	return transfer.EngineServiceConfig{
-		WorkerPath:    workerPath,
-		RelayAddress:  relayAddress,
-		RelayPassword: relayPassword,
-		EventSink:     eventSink,
+		WorkerPath:     workerPath,
+		RelayAddress:   relayAddress,
+		RelayPassword:  relayPassword,
+		RelayLabel:     relayLabel,
+		RelayConfigErr: relayConfigErr,
+		EventSink:      eventSink,
 	}
 }

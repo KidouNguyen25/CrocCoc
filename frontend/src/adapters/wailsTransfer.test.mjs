@@ -97,3 +97,28 @@ test('desktop adapter fails loudly when required Wails bindings are missing', as
   await assert.rejects(() => client.getTransferSnapshot('id'), /GetTransferSnapshot/)
   await assert.rejects(() => client.decideReceive('id', 'offer', true), /DecideReceive/)
 })
+
+test('desktop adapter GetCrocInfo preserves relayLabel and strips unexpected fields', async () => {
+  const host = {
+    go: { main: { App: {
+      GetCrocInfo: async () => ({
+        available: true,
+        version: '11.6.4',
+        relayLabel: 'Relay công cộng: croc.schollz.com:9009',
+        relayPassword: 'should-never-cross-ipc',
+      }),
+      StartSend: async () => 'id',
+      StartReceive: async () => 'id',
+      CancelTransfer: async () => true,
+    } } },
+    runtime: { EventsOn: () => () => {} },
+  }
+  const client = getDesktopClient(host)
+  const info = await client.getCrocInfo()
+  assert.deepEqual(info, {
+    available: true,
+    version: '11.6.4',
+    relayLabel: 'Relay công cộng: croc.schollz.com:9009',
+  })
+  assert.equal('relayPassword' in info, false)
+})

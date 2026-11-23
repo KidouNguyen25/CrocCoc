@@ -68,7 +68,9 @@ export function App() {
         (info) => {
           setCrocInfo(info)
           if (!info.available) {
-            setHostTitle('Ứng dụng desktop · Chưa phát hiện Croc')
+            setHostTitle(info.message ? `Ứng dụng desktop · ${info.message}` : 'Ứng dụng desktop · Chưa phát hiện Croc')
+          } else if (info.relayLabel) {
+            setHostTitle(`Ứng dụng desktop (Wails IPC) · ${info.relayLabel}`)
           }
         },
         () => {
@@ -332,7 +334,10 @@ export function App() {
         <p className="overline">TRUYỀN TỆP MÃ HÓA CROC PAKE</p>
         <h1 id="title">Chuyển dữ liệu nhanh & an toàn</h1>
         <p className="intro-desc">
-          Nội dung tệp được mã hóa đầu cuối theo chuẩn Croc PAKE. Bản MVP truyền qua máy chủ relay trung gian (relay quan sát được metadata mạng và thời điểm, không đọc được nội dung).
+          Nội dung tệp được mã hóa đầu cuối theo chuẩn Croc PAKE.{' '}
+          {crocInfo?.relayLabel
+            ? `Tuyến đang dùng: ${crocInfo.relayLabel} — máy chủ relay chỉ thấy metadata mạng (IP, thời điểm, lưu lượng), không đọc được nội dung tệp.`
+            : 'Bản MVP truyền qua máy chủ relay trung gian (relay quan sát được metadata mạng và thời điểm, không đọc được nội dung).'}
         </p>
       </section>
 

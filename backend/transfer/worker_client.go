@@ -20,6 +20,7 @@ const (
 
 var (
 	ErrWorkerUnavailable    = errors.New("ENGINE_UNAVAILABLE: không thể khởi chạy engine")
+	ErrRelayUnavailable     = errors.New("RELAY_UNAVAILABLE: không tới được máy chủ relay hoặc kết nối relay bị gián đoạn; hãy kiểm tra mạng và các cổng 9009–9013")
 	ErrWorkerProtocol       = errors.New("ENGINE_FAILED: engine trả giao thức không hợp lệ")
 	ErrPayloadNotIntegrated = errors.New("ENGINE_UNAVAILABLE: engine chưa hỗ trợ payload")
 	ErrPreparationTimeout   = errors.New("PREPARATION_TIMEOUT: chuẩn bị truyền quá thời hạn")
@@ -336,7 +337,7 @@ func (w *WorkerClient) send(
 			return ctx.Err()
 		}
 		if errors.Is(err, errWorkerFrameTimeout) {
-			return ErrPreparationTimeout
+			return ErrRelayUnavailable
 		}
 		return ErrWorkerProtocol
 	}
@@ -414,7 +415,7 @@ func (w *WorkerClient) receiveManifest(
 			return ctx.Err()
 		}
 		if errors.Is(err, errWorkerFrameTimeout) {
-			return ErrPreparationTimeout
+			return ErrRelayUnavailable
 		}
 		return ErrWorkerProtocol
 	}
@@ -525,7 +526,9 @@ func workerStatusError(status string) error {
 		return ErrInvalidInput
 	case "timeout":
 		return ErrPeerTimeout
-	case "metadata_failed", "cancelled":
+	case "metadata_failed":
+		return ErrRelayUnavailable
+	case "cancelled":
 		return ErrTransferFailed
 	default:
 		return ErrWorkerProtocol
