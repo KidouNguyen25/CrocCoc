@@ -17,10 +17,10 @@ const executables = [
   ['bin/croccoc-engine.exe', join(stage, 'bin', 'croccoc-engine.exe')],
 ]
 const modules = new Map()
-const workerScript = readFileSync('backend/engine-spike/worker/build.ps1', 'utf8')
+const workerScript = readFileSync(new URL('../../backend/engine-spike/worker/build.ps1', import.meta.url), 'utf8')
 const upstreamCommit = workerScript.match(/\$upstreamCommit\s*=\s*"([0-9a-f]{40})"/)?.[1]
 const workerPatchHash = createHash('sha256')
-  .update(readFileSync('backend/engine-spike/croc-v11.6.4-manifest-only.patch'))
+  .update(readFileSync(new URL('../../backend/engine-spike/croc-v11.6.4-manifest-only.patch', import.meta.url)))
   .digest('hex')
 if (!upstreamCommit) throw new Error('Missing pinned Croc upstream commit')
 
@@ -66,6 +66,17 @@ for (const [name, file] of executables) {
 
 if (modules.size === 0) {
   throw new Error('No Go dependency metadata found in either executable; SBOM is incomplete')
+}
+
+// Fail closed even when the Croc module was omitted entirely (for example
+// because malformed or development-only build metadata failed version parsing).
+// Checking only inside .map() never runs the guard for a missing component.
+const sawPatchedCroc = [...modules.values()].some((module) =>
+  module.moduleName === 'github.com/schollz/croc/v11' &&
+  module.usedBy.has('bin/croccoc-engine.exe') &&
+  module.replacements.size > 0)
+if (!sawPatchedCroc) {
+  throw new Error('Pinned Croc worker module/replacement missing from Go build metadata')
 }
 
 const components = [...modules.values()]

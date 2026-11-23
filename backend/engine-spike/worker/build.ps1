@@ -67,7 +67,7 @@ try {
     if (-not $SkipVulnScan) {
         # govulncheck has no -modfile flag; GOFLAGS ensures the scan uses the
         # exact patched worker module graph used by the following build.
-        $env:GOFLAGS = "-modfile=$modPath"
+        $env:GOFLAGS = "-modfile=$(Split-Path -Leaf $modPath)"
         Invoke-Native govulncheck @("-tags", "croc_no_tailcat", "./...")
         $env:GOFLAGS = ""
     }
