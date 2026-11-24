@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { TransferUpdate } from '../transfer.ts'
+import { isRunning } from '../transfer.ts'
 import { SAMPLE_CODE } from '../mockTransfer.ts'
 import { TransferProgress } from './TransferProgress.tsx'
 import { ReceiveOfferDialog } from './ReceiveOfferDialog.tsx'
@@ -28,15 +29,15 @@ export function ReceivePanel({
   const [code, setCode] = useState('')
   const [outputDir, setOutputDir] = useState('Downloads')
   const [errorMsg, setErrorMsg] = useState('')
+  const [feedback, setFeedback] = useState('Mã nhập chỉ được kiểm tra trong bản xem trước.')
   const [folderCopied, setFolderCopied] = useState(false)
 
   useEffect(() => {
-    // Desktop paths are not valid mock defaults and vice versa. Reset the
-    // directory when changing engine modes, never reuse a native path in mock.
-    setOutputDir((dir) => isMock ? 'Downloads' : (dir === 'Downloads' ? '' : dir))
+    setOutputDir((dir) => (isMock ? 'Downloads' : dir === 'Downloads' ? '' : dir))
   }, [isMock])
 
   const state = update?.state ?? 'IDLE'
+  const activeRunning = isRunning(state)
   const isAwaiting = state === 'AWAITING_ACCEPTANCE' && !!update?.receiveOffer
 
   const handlePasteCode = async () => {
@@ -45,33 +46,17 @@ export function ReceivePanel({
       if (text) {
         setCode(text.trim())
         setErrorMsg('')
+        setFeedback('Đã dán mã từ clipboard.')
       }
     } catch {
-      setErrorMsg('Không thể truy cập bộ nhớ tạm. Vui lòng dán thủ công.')
+      setErrorMsg('Không thể đọc bộ nhớ tạm. Hãy dán mã thủ công.')
     }
   }
 
-  const handleStart = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault()
-    const trimmedCode = code.trim()
-    const trimmedDir = outputDir.trim()
-
-    if (!trimmedCode) {
-      setErrorMsg('Vui lòng nhập mã kết nối.')
-      return
-    }
-    if (!trimmedDir) {
-      setErrorMsg('Vui lòng chọn thư mục lưu tệp.')
-      return
-    }
-
+  const handleFillSample = () => {
+    setCode(SAMPLE_CODE)
     setErrorMsg('')
-    try {
-      await onStartReceive(trimmedCode, trimmedDir)
-      setCode('') // do not keep the secret in the input after submission
-    } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : 'Không thể bắt đầu phiên nhận.')
-    }
+    setFeedback('Đã điền mã mẫu. Chọn Nhận tệp để tiếp tục.')
   }
 
   const handleSelectFolder = async () => {
@@ -84,6 +69,29 @@ export function ReceivePanel({
       }
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Không thể chọn thư mục nhận.')
+    }
+  }
+
+  const handleStart = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault()
+    const trimmedCode = code.trim()
+    const trimmedDir = outputDir.trim()
+
+    if (!trimmedCode) {
+      setErrorMsg('Nhập mã hoặc chọn Dùng mã mẫu.')
+      return
+    }
+    if (!trimmedDir) {
+      setErrorMsg('Vui lòng chọn thư mục lưu tệp nhận.')
+      return
+    }
+
+    setErrorMsg('')
+    try {
+      await onStartReceive(trimmedCode, trimmedDir)
+      setCode('') // Do not retain the secret passphrase in the input field
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Không thể bắt đầu phiên nhận.')
     }
   }
 
@@ -101,103 +109,146 @@ export function ReceivePanel({
     onReset()
     setCode('')
     setErrorMsg('')
+    setFeedback('Mã nhập chỉ được kiểm tra trong bản xem trước.')
   }
 
   return (
-    <div className="panel-content receive-panel" aria-label="Bảng nhận tệp">
-      {/* When IDLE: Show code input and output directory selector */}
-      {state === 'IDLE' && (
-        <form className="receive-form" onSubmit={handleStart}>
-          <div className="form-group">
-            <label htmlFor="connection-code-input" className="form-label">
-              MÃ KẾT NỐI
-            </label>
-            <div className="input-with-button">
-              <input
-                id="connection-code-input"
-                type="text"
-                className="text-input code-input"
-                placeholder="Nhập mã từ người gửi (VD: 1234-alpha-beta)"
-                value={code}
-                onChange={(e) => {
-                  setCode(e.target.value)
-                  setErrorMsg('')
-                }}
-                disabled={busy}
-                autoFocus
-              />
-              <button
-                type="button"
-                className="btn-secondary"
-                onClick={handlePasteCode}
-                disabled={busy}
-                title="Dán mã từ clipboard"
-              >
-                📋 Dán
-              </button>
-            </div>
-            {isMock && (
-              <div className="mock-quick-actions">
-                <span>Gợi ý thử nghiệm: </span>
-                <button
-                  type="button"
-                  className="btn-link"
-                  onClick={() => {
-                    setCode(SAMPLE_CODE)
-                    setErrorMsg('')
-                  }}
-                >
-                  Dùng mã mô phỏng mẫu
-                </button>
-              </div>
-            )}
-          </div>
+    <section className="screen" id="nhan" aria-labelledby="receive-title">
+      <header className="intro">
+        <h1 id="receive-title" tabIndex={-1}>
+          Nhận tệp
+        </h1>
+        <p>Nhập mã do người gửi cung cấp để bắt đầu.</p>
+      </header>
 
-          <div className="form-group">
-            <label htmlFor="output-dir-input" className="form-label">
-              THƯ MỤC LƯU TỆP NHẬN
-            </label>
-            <div className="input-with-button">
-              <input
-                id="output-dir-input"
-                type="text"
-                className="text-input"
-                placeholder={onSelectReceiveDirectory ? 'Chọn thư mục lưu trên Windows' : 'Đường dẫn thư mục lưu (VD: Downloads)'}
-                value={outputDir}
-                onChange={(e) => setOutputDir(e.target.value)}
-                disabled={busy}
-              />
-              {onSelectReceiveDirectory && (
-                <button type="button" className="btn-secondary" onClick={() => void handleSelectFolder()} disabled={busy}>
-                  📁 Chọn thư mục
-                </button>
-              )}
-            </div>
-            <p className="field-hint">
-              Các tệp nhận về được tải vào vùng tạm riêng, kiểm tra toàn vẹn và chỉ ghi mới (không ghi đè) tại thư mục này.
-            </p>
-          </div>
+      <form className="panel narrow form-panel" id="receive-form" onSubmit={handleStart} noValidate>
+        <div className="panel-head">
+          <h2>Kết nối với người gửi</h2>
+          <button
+            type="button"
+            className="sample"
+            id="fill-code"
+            onClick={handleFillSample}
+            disabled={busy}
+          >
+            Dùng mã mẫu
+          </button>
+        </div>
 
-          {errorMsg && (
-            <div className="error-alert" role="alert">
-              <span className="error-icon">⚠</span>
-              <span>{errorMsg}</span>
-            </div>
-          )}
+        <label htmlFor="receive-code">Mã Croc</label>
+        <div className="code-input-group">
+          <input
+            id="receive-code"
+            type="text"
+            placeholder="Nhập mã kết nối"
+            value={code}
+            onChange={(e) => {
+              setCode(e.target.value)
+              setErrorMsg('')
+              setFeedback(isMock ? 'Mã nhập chỉ được kiểm tra trong bản xem trước.' : 'Nhập mã kết nối an toàn.')
+            }}
+            autoComplete="off"
+            spellCheck="false"
+            maxLength={96}
+            disabled={busy}
+            aria-invalid={Boolean(errorMsg)}
+            aria-describedby="receive-feedback"
+          />
+          <button
+            type="button"
+            className="button secondary"
+            onClick={() => void handlePasteCode()}
+            disabled={busy}
+            title="Dán từ clipboard"
+          >
+            Dán
+          </button>
+        </div>
 
-          <div className="action-row">
+        <label htmlFor="receive-dir" style={{ marginTop: '16px' }}>
+          Thư mục lưu tệp
+        </label>
+        <div className="dir-input-group">
+          <input
+            id="receive-dir"
+            type="text"
+            placeholder={onSelectReceiveDirectory ? 'Chọn thư mục lưu trên máy tính' : 'Thư mục nhận (VD: Downloads)'}
+            value={outputDir}
+            onChange={(e) => setOutputDir(e.target.value)}
+            disabled={busy}
+          />
+          {onSelectReceiveDirectory && (
             <button
+              type="button"
+              className="button secondary"
+              onClick={() => void handleSelectFolder()}
+              disabled={busy}
+            >
+              Chọn
+            </button>
+          )}
+        </div>
+
+        {errorMsg ? (
+          <p className="panel-note" id="receive-feedback" role="status" data-error="">
+            {errorMsg}
+          </p>
+        ) : (
+          <p className="panel-note" id="receive-feedback" role="status">
+            {feedback}
+          </p>
+        )}
+
+        <div className="panel-foot">
+          <span />
+          {!activeRunning ? (
+            <button
+              className="button primary"
               type="submit"
-              className="btn-primary btn-large btn-receive"
               disabled={busy || !code.trim() || !outputDir.trim()}
             >
-              📥 Bắt đầu nhận tệp
+              Nhận tệp{' '}
+              <svg className="icon" aria-hidden="true">
+                <use href="#i-arrow" />
+              </svg>
             </button>
-          </div>
-        </form>
+          ) : (
+            <button type="button" className="button danger" onClick={onCancel}>
+              Hủy phiên
+            </button>
+          )}
+        </div>
+      </form>
+
+      {/* Progress and results */}
+      {state !== 'IDLE' && !isAwaiting && (
+        <div className="panel narrow" style={{ marginTop: '16px' }}>
+          <TransferProgress
+            update={update}
+            direction="receive"
+            isDesktop={!isMock}
+            onCancel={onCancel}
+            onReset={handleResetAll}
+          />
+
+          {state === 'COMPLETED' && (
+            <div style={{ marginTop: '16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
+              <span style={{ fontSize: '13px', color: 'var(--muted)' }}>
+                Đã lưu tại: <code style={{ color: 'var(--leaf)' }}>{outputDir}</code>
+              </span>
+              <button
+                type="button"
+                className="button secondary"
+                onClick={() => void handleCopyFolderPath()}
+              >
+                {folderCopied ? 'Đã sao chép' : 'Sao chép đường dẫn'}
+              </button>
+            </div>
+          )}
+        </div>
       )}
 
-      {/* When waiting for peer approval of incoming offer */}
+      {/* Offer dialog when awaiting user decision */}
       {isAwaiting && update?.receiveOffer && (
         <ReceiveOfferDialog
           offer={update.receiveOffer}
@@ -211,38 +262,6 @@ export function ReceivePanel({
           disabled={busy && state !== 'AWAITING_ACCEPTANCE'}
         />
       )}
-
-      {/* When running or finished (and not currently showing offer dialog): Show TransferProgress */}
-      {state !== 'IDLE' && !isAwaiting && (
-        <div className="receive-progress-wrapper">
-          <TransferProgress
-            update={update}
-            direction="receive"
-            isDesktop={!isMock}
-            onCancel={onCancel}
-            onReset={handleResetAll}
-          />
-
-          {/* Post-completion extra info: Destination directory and copy path */}
-          {state === 'COMPLETED' && (
-            <div className="destination-card">
-              <div className="dest-icon">📂</div>
-              <div className="dest-info">
-                <span className="dest-label">Thư mục đã lưu:</span>
-                <code className="dest-path">{outputDir}</code>
-              </div>
-              <button
-                type="button"
-                className="btn-secondary btn-copy-dest"
-                onClick={handleCopyFolderPath}
-                title="Sao chép đường dẫn thư mục"
-              >
-                {folderCopied ? '✓ Đã chép' : 'Sao chép đường dẫn'}
-              </button>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
+    </section>
   )
 }

@@ -12,14 +12,26 @@ import {
 } from './transfer.ts'
 import type { CrocInfo, TransferClient, TransferUpdate } from './transfer.ts'
 import { Header } from './components/Header.tsx'
-import { ModeSwitcher } from './components/ModeSwitcher.tsx'
+import { SidebarRail } from './components/ModeSwitcher.tsx'
+import type { AppRoute } from './components/ModeSwitcher.tsx'
 import { SendPanel } from './components/SendPanel.tsx'
 import { ReceivePanel } from './components/ReceivePanel.tsx'
+import { STATE_LABELS } from './utils/formatters.ts'
 
 type SnapshotProbeResult = { lost: boolean; backendMissing: boolean }
 
+export interface SessionHistoryItem {
+  id: string
+  direction: 'send' | 'receive'
+  label: string
+  code: string
+  timestamp: string
+  status: string
+  statusText: string
+}
+
 export function App() {
-  const [mode, setMode] = useState<'send' | 'receive'>('send')
+  const [route, setRoute] = useState<AppRoute>('gui')
   const [hasDesktopRuntime, setHasDesktopRuntime] = useState(false)
   const [isDesktop, setIsDesktop] = useState(false)
   const [useMock, setUseMock] = useState(false)
@@ -34,12 +46,67 @@ export function App() {
   const [forceResetAvailable, setForceResetAvailable] = useState(false)
   const [pollRecoveryToken, setPollRecoveryToken] = useState(0)
   const [appError, setAppError] = useState('')
+  const [sessions, setSessions] = useState<SessionHistoryItem[]>([])
 
-  // Create persistent mock client instance for browser preview
+  // Persistent mock client instance for browser preview
   const mockClient = useMemo(() => createMockTransferClient(), [])
   const clientRef = useRef<TransferClient>(mockClient)
   const trackerRef = useRef(createTransferSessionTracker())
   const snapshotInFlightRef = useRef<{ transferID: string; promise: Promise<SnapshotProbeResult> } | null>(null)
+
+  // Listen to hash change for navigation
+  useEffect(() => {
+    const handleHash = () => {
+      const hash = window.location.hash.replace(/^#/, '')
+      if (hash === 'gui' || hash === 'nhan' || hash === 'phien' || hash === 'engine') {
+        setRoute(hash as AppRoute)
+      }
+    }
+    handleHash()
+    window.addEventListener('hashchange', handleHash)
+    return () => window.removeEventListener('hashchange', handleHash)
+  }, [])
+
+  const changeRoute = (nextRoute: AppRoute) => {
+    setRoute(nextRoute)
+    window.location.hash = nextRoute
+  }
+
+  const recordSession = (
+    transferID: string,
+    direction: 'send' | 'receive',
+    label: string,
+    code: string,
+    state: string,
+  ) => {
+    const timeStr = new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })
+    setSessions((prev) => {
+      const existingIdx = prev.findIndex((s) => s.id === transferID)
+      const statusText = STATE_LABELS[state as keyof typeof STATE_LABELS] || state
+      if (existingIdx >= 0) {
+        const copy = [...prev]
+        copy[existingIdx] = {
+          ...copy[existingIdx],
+          code: code || copy[existingIdx].code,
+          status: state,
+          statusText,
+        }
+        return copy
+      }
+      return [
+        {
+          id: transferID,
+          direction,
+          label,
+          code: code || '—',
+          timestamp: timeStr,
+          status: state,
+          statusText,
+        },
+        ...prev,
+      ]
+    })
+  }
 
   const applyTrackedUpdate = (next: TransferUpdate | undefined) => {
     if (!next) return
@@ -53,6 +120,16 @@ export function App() {
       setConnectionCode(next.connectionCode)
     } else if (next.state !== 'WAITING_FOR_PEER' && next.state !== 'PREPARING') {
       setConnectionCode('')
+    }
+
+    if (next.transferID) {
+      recordSession(
+        next.transferID,
+        route === 'nhan' ? 'receive' : 'send',
+        route === 'nhan' ? 'Nhận tệp' : 'Gửi tệp',
+        next.connectionCode || connectionCode,
+        next.state,
+      )
     }
   }
 
@@ -90,7 +167,6 @@ export function App() {
       const trackingWasLost = trackerRef.current.snapshotFailures() >= MAX_SNAPSHOT_RETRIES
       const accepted = trackerRef.current.onEvent(event)
       if (accepted && trackingWasLost) {
-        // A fresh native event restores tracking; resume polling for a missed terminal event.
         setPollRecoveryToken((token) => token + 1)
       }
       applyTrackedUpdate(accepted)
@@ -114,8 +190,6 @@ export function App() {
     const noChange: SnapshotProbeResult = { lost: false, backendMissing: false }
     const inFlight = snapshotInFlightRef.current
     if (inFlight) {
-      // A cancel request must await the already-running focus/timer probe
-      // rather than using an old failure counter to enable forced reset.
       return inFlight.transferID === transferID ? inFlight.promise : Promise.resolve(noChange)
     }
     if (!clientRef.current.getTransferSnapshot) return Promise.resolve(noChange)
@@ -133,7 +207,9 @@ export function App() {
         setTrackingLost(true)
         setBackendMissing(true)
         setForceResetAvailable(true)
-        setTrackingError('Backend không còn lưu phiên này; chưa xác định truyền thành công hay thất bại. Hãy kiểm tra thư mục gửi/nhận trước khi đặt lại giao diện.')
+        setTrackingError(
+          'Backend không còn lưu phiên này; chưa xác định truyền thành công hay thất bại. Hãy kiểm tra thư mục gửi/nhận trước khi đặt lại giao diện.',
+        )
         return { lost: true, backendMissing: true }
       }
       if (result.trackingLost) {
@@ -182,8 +258,6 @@ export function App() {
       if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
         return
       }
-      // Allow a single recovery probe on window focus/visibility even after
-      // interval polling stopped at MAX_SNAPSHOT_RETRIES.
       void runSync(true)
     }
 
@@ -204,9 +278,12 @@ export function App() {
     }
   }, [activeTransferID, activeRunning, pollRecoveryToken])
 
-  const beginTransfer = async (request: () => Promise<string>, fallbackError: string) => {
-    // Buffer events by ID before Start* resolves and never let a previous
-    // terminal session block a newly started session.
+  const beginTransfer = async (
+    request: () => Promise<string>,
+    fallbackError: string,
+    direction: 'send' | 'receive',
+    label: string,
+  ) => {
     trackerRef.current.beginStart()
     snapshotInFlightRef.current = null
     setPending(true)
@@ -221,6 +298,7 @@ export function App() {
       const transferID = await request()
       const { update: started } = trackerRef.current.resolveStart(transferID)
       applyTrackedUpdate(started)
+      recordSession(transferID, direction, label, '', started?.state || 'PREPARING')
       void probeSnapshot(transferID, false)
     } catch (err) {
       trackerRef.current.failStart()
@@ -232,10 +310,20 @@ export function App() {
   }
 
   const handleStartSend = (paths: string[]) =>
-    beginTransfer(() => clientRef.current.startSend(paths), 'Lỗi khi bắt đầu phiên gửi.')
+    beginTransfer(
+      () => clientRef.current.startSend(paths),
+      'Lỗi khi bắt đầu phiên gửi.',
+      'send',
+      `Gửi ${paths.length} mục`,
+    )
 
   const handleStartReceive = (code: string, outputDir: string) =>
-    beginTransfer(() => clientRef.current.startReceive(code, outputDir), 'Lỗi khi bắt đầu phiên nhận.')
+    beginTransfer(
+      () => clientRef.current.startReceive(code, outputDir),
+      'Lỗi khi bắt đầu phiên nhận.',
+      'receive',
+      'Nhận tệp',
+    )
 
   const handleSelectPaths = (kind: 'sendFiles' | 'sendDirectory' | 'receiveDirectory') => {
     const selectPaths = clientRef.current.selectPaths
@@ -285,19 +373,22 @@ export function App() {
     } catch (err) {
       cancelIssue = err instanceof Error ? err.message : 'Không thể gửi yêu cầu hủy phiên.'
     }
-    // Recover the actual native state before ever offering a UI-only reset.
-    // An accepted cancellation is asynchronous and is not a terminal update.
     const probe = await probeSnapshot(transferID, true)
     const current = trackerRef.current.current()
-    const stillLost = !probe.backendMissing && current?.transferID === transferID &&
+    const stillLost =
+      !probe.backendMissing &&
+      current?.transferID === transferID &&
       isRunning(current.state) &&
       trackerRef.current.snapshotFailures() >= MAX_SNAPSHOT_RETRIES
     if (cancelIssue && stillLost) {
       setTrackingError(cancelIssue)
       setForceResetAvailable(true)
-    } else if (cancelIssue && !probe.backendMissing &&
-      current?.transferID === transferID && isRunning(current.state)) {
-      // A healthy subsequent snapshot or native event clears this transient notice.
+    } else if (
+      cancelIssue &&
+      !probe.backendMissing &&
+      current?.transferID === transferID &&
+      isRunning(current.state)
+    ) {
       setTrackingError(cancelIssue)
     }
   }
@@ -315,46 +406,81 @@ export function App() {
     setForceResetAvailable(false)
     setUpdate(undefined)
     setConnectionCode('')
-    setAppError(force && !backendMissing
-      ? 'Chỉ đặt lại giao diện, chưa xác nhận backend đã dừng. Phiên mới có thể bị từ chối BUSY; hãy kiểm tra lại engine trước khi thử.'
-      : '')
-  }
-
-  const handleModeChange = (newMode: 'send' | 'receive') => {
-    if (busy) return
-    setMode(newMode)
-    handleReset()
+    setAppError(
+      force && !backendMissing
+        ? 'Chỉ đặt lại giao diện, chưa xác nhận backend đã dừng. Phiên mới có thể bị từ chối BUSY; hãy kiểm tra lại engine trước khi thử.'
+        : '',
+    )
   }
 
   return (
-    <main className="shell">
-      <Header hostTitle={hostTitle} crocInfo={crocInfo} isDesktop={isDesktop} />
+    <div className="shell">
+      {/* SVG Symbols Sprite */}
+      <svg className="symbols" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" width="0" height="0">
+        <symbol id="i-send" viewBox="0 0 24 24">
+          <path d="M3 11.5 21 3l-5 18-4-7-9-2.5ZM12 14l4-5" />
+        </symbol>
+        <symbol id="i-receive" viewBox="0 0 24 24">
+          <path d="M3 13h5l2 3h4l2-3h5M5 6h14l2 7v6H3v-6l2-7Z" />
+        </symbol>
+        <symbol id="i-history" viewBox="0 0 24 24">
+          <path d="M3 12a9 9 0 1 1 2.7 6.4M3 5v7h7m2-5v5l3 2" />
+        </symbol>
+        <symbol id="i-engine" viewBox="0 0 24 24">
+          <path d="M4 4h16v16H4zM8 9l3 3-3 3m5 0h3" />
+        </symbol>
+        <symbol id="i-file" viewBox="0 0 24 24">
+          <path d="M6 3h8l4 4v14H6zM14 3v5h4M9 12h6m-6 4h6" />
+        </symbol>
+        <symbol id="i-arrow" viewBox="0 0 24 24">
+          <path d="M4 12h15m-6-6 6 6-6 6" />
+        </symbol>
+        <symbol id="i-copy" viewBox="0 0 24 24">
+          <rect x="8" y="8" width="12" height="12" rx="2" />
+          <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" />
+        </symbol>
+        <symbol id="i-upload" viewBox="0 0 24 24">
+          <path d="M12 15V3m-5 5 5-5 5 5M4 15v5h16v-5" />
+        </symbol>
+        <symbol id="i-close" viewBox="0 0 24 24">
+          <path d="m6 6 12 12M18 6 6 18" />
+        </symbol>
+        <symbol id="i-preview" viewBox="0 0 24 24">
+          <path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6-10-6-10-6Z" />
+          <circle cx="12" cy="12" r="2.5" />
+        </symbol>
+      </svg>
 
-      <section className="intro" aria-labelledby="title">
-        <p className="overline">TRUYỀN TỆP MÃ HÓA CROC PAKE</p>
-        <h1 id="title">Chuyển dữ liệu nhanh & an toàn</h1>
-        <p className="intro-desc">
-          Nội dung tệp được mã hóa đầu cuối theo chuẩn Croc PAKE.{' '}
-          {crocInfo?.relayLabel
-            ? `Tuyến đang dùng: ${crocInfo.relayLabel} — máy chủ relay chỉ thấy metadata mạng (IP, thời điểm, lưu lượng), không đọc được nội dung tệp.`
-            : 'Bản MVP truyền qua máy chủ relay trung gian (relay quan sát được metadata mạng và thời điểm, không đọc được nội dung).'}
-        </p>
-      </section>
+      {/* Topbar Header */}
+      <Header
+        hostTitle={hostTitle}
+        crocInfo={crocInfo}
+        isDesktop={isDesktop}
+        onBrandClick={() => changeRoute('gui')}
+      />
 
-      {/* Main interaction panel */}
-      <section className="panel" aria-label="Khu vực truyền tệp">
-        <ModeSwitcher mode={mode} onModeChange={handleModeChange} disabled={busy} />
+      <div className="layout">
+        {/* Sidebar Rail Navigation */}
+        <SidebarRail
+          activeRoute={route}
+          onRouteChange={changeRoute}
+          disabled={busy}
+          isDesktop={isDesktop}
+          isMock={!isDesktop || useMock}
+          crocAvailable={crocInfo?.available}
+          relayLabel={crocInfo?.relayLabel}
+        />
 
-        <div className="panel-body">
+        {/* Main Content Screens */}
+        <main>
           {displayedError && (
             <div className="error-alert top-alert" role="alert">
-              <span className="error-icon">⚠</span>
               <span>{displayedError}</span>
               {trackingLost && activeTransferID ? (
                 <div className="alert-actions">
                   <button
                     type="button"
-                    className="btn-secondary btn-alert-action"
+                    className="button secondary"
                     onClick={() => {
                       void probeSnapshot(activeTransferID, true)
                     }}
@@ -364,32 +490,30 @@ export function App() {
                   {!backendMissing && (
                     <button
                       type="button"
-                      className="btn-secondary btn-alert-action"
+                      className="button secondary"
                       onClick={() => void handleCancelLostTransfer()}
                     >
                       Yêu cầu hủy phiên
                     </button>
                   )}
                   {forceResetAvailable && (
-                    <>
-                      <button
-                        type="button"
-                        className="btn-secondary btn-alert-action"
-                        onClick={() => handleReset(true)}
-                      >
-                        {backendMissing ? 'Đặt lại giao diện' : 'Buộc đặt lại giao diện'}
-                      </button>
-                      {!backendMissing && (
-                        <span>Chỉ đặt lại màn hình; backend có thể vẫn đang truyền và từ chối phiên mới (BUSY).</span>
-                      )}
-                    </>
+                    <button
+                      type="button"
+                      className="button secondary"
+                      onClick={() => handleReset(true)}
+                    >
+                      {backendMissing ? 'Đặt lại giao diện' : 'Buộc đặt lại giao diện'}
+                    </button>
                   )}
                 </div>
               ) : (
                 <button
                   type="button"
                   className="btn-close-alert"
-                  onClick={() => { setAppError(''); setTrackingError('') }}
+                  onClick={() => {
+                    setAppError('')
+                    setTrackingError('')
+                  }}
                   aria-label="Đóng thông báo lỗi"
                 >
                   ✕
@@ -398,7 +522,8 @@ export function App() {
             </div>
           )}
 
-          {mode === 'send' ? (
+          {/* Screen 1: Gửi tệp (#gui) */}
+          {route === 'gui' && (
             <SendPanel
               update={update}
               connectionCode={connectionCode}
@@ -410,7 +535,10 @@ export function App() {
               onCancel={handleCancel}
               onReset={handleReset}
             />
-          ) : (
+          )}
+
+          {/* Screen 2: Nhận tệp (#nhan) */}
+          {route === 'nhan' && (
             <ReceivePanel
               update={update}
               busy={busy}
@@ -422,32 +550,158 @@ export function App() {
               onReset={handleReset}
             />
           )}
-        </div>
-      </section>
 
-      {/* Footer & Mode switcher for development / demo */}
-      <footer className="footer">
-        <div className="footer-info">
-          <span>CrocCoc Desktop v0.1.0 • Chuẩn truyền Croc PAKE</span>
-          {hasDesktopRuntime && (
-            <button
-              type="button"
-              className="btn-toggle-mock"
-              aria-pressed={useMock}
-              onClick={() => {
-                // Never detach the live engine listener while a transfer is active.
-                if (busy) return
-                setUseMock(!useMock)
-                handleReset()
-              }}
-              disabled={busy}
-              title={busy ? 'Không thể đổi engine trong khi truyền tệp' : undefined}
-            >
-              {useMock ? 'Chuyển sang Engine thật' : 'Chuyển sang Chế độ mô phỏng'}
-            </button>
+          {/* Screen 3: Phiên truyền (#phien) */}
+          {route === 'phien' && (
+            <section className="screen" id="phien" aria-labelledby="history-title">
+              <header className="intro">
+                <h1 id="history-title" tabIndex={-1}>
+                  Phiên truyền
+                </h1>
+                <p>Xem các phiên truyền được tạo trong lần mở này.</p>
+              </header>
+
+              <section className="panel narrow" aria-labelledby="history-list-title">
+                <div className="panel-head">
+                  <h2 id="history-list-title">Lịch sử phiên truyền</h2>
+                  <span className="state" id="history-count">
+                    {sessions.length} phiên
+                  </span>
+                </div>
+
+                {sessions.length === 0 ? (
+                  <p className="empty" id="history-empty">
+                    Chưa có phiên nào.{' '}
+                    <button type="button" className="link-btn" onClick={() => changeRoute('gui')}>
+                      Tạo mã gửi đầu tiên
+                    </button>
+                    .
+                  </p>
+                ) : (
+                  <ul className="file-list history-list" id="history-list">
+                    {sessions.map((item) => (
+                      <li key={item.id}>
+                        <div className="file-label">
+                          <svg className="icon" aria-hidden="true">
+                            <use href={item.direction === 'send' ? '#i-send' : '#i-receive'} />
+                          </svg>
+                          <div>
+                            <strong>{item.label}</strong>
+                            <div className="session-meta">{item.timestamp}</div>
+                          </div>
+                        </div>
+                        <div className="file-meta">
+                          {item.code && item.code !== '—' && <code>{item.code} </code>}
+                          <span className={`session-badge badge-${item.status.toLowerCase()}`}>
+                            {item.statusText}
+                          </span>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </section>
+            </section>
           )}
-        </div>
-      </footer>
-    </main>
+
+          {/* Screen 4: Croc engine (#engine) */}
+          {route === 'engine' && (
+            <section className="screen" id="engine" aria-labelledby="engine-title">
+              <header className="intro">
+                <h1 id="engine-title" tabIndex={-1}>
+                  Croc engine
+                </h1>
+                <p>Thông tin kết nối và cấu hình động cơ truyền tệp.</p>
+              </header>
+
+              <section className="panel narrow" aria-labelledby="engine-status">
+                <div className="panel-head">
+                  <h2 id="engine-status">Trạng thái</h2>
+                  <span className="state" data-ready={crocInfo?.available ? '' : undefined}>
+                    {crocInfo?.available ? 'Sẵn sàng' : 'Chưa kết nối'}
+                  </span>
+                </div>
+
+                <dl className="spec-list">
+                  <div>
+                    <dt>Chương trình Croc</dt>
+                    <dd>
+                      {crocInfo?.version
+                        ? `Croc ${crocInfo.version}`
+                        : isDesktop
+                          ? 'Chưa phát hiện'
+                          : 'Chế độ mô phỏng (Mock)'}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Đường dẫn cài đặt</dt>
+                    <dd>{isDesktop ? 'Tích hợp sẵn (Worker Go)' : 'Trình duyệt Web (Mock)'}</dd>
+                  </div>
+                  <div>
+                    <dt>Máy chủ Relay</dt>
+                    <dd>{crocInfo?.relayLabel || 'Relay công cộng (Mặc định)'}</dd>
+                  </div>
+                  <div>
+                    <dt>Môi trường chạy</dt>
+                    <dd>{isDesktop ? 'Ứng dụng desktop (Wails IPC)' : 'Bản xem trước trình duyệt'}</dd>
+                  </div>
+                  {crocInfo?.message && (
+                    <div>
+                      <dt>Thông tin engine</dt>
+                      <dd>{crocInfo.message}</dd>
+                    </div>
+                  )}
+                </dl>
+
+                {hasDesktopRuntime && (
+                  <div
+                    style={{
+                      marginTop: '20px',
+                      paddingTop: '16px',
+                      borderTop: '1px solid var(--rule)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      flexWrap: 'wrap',
+                      gap: '12px',
+                    }}
+                  >
+                    <span style={{ fontSize: '13px', color: 'var(--muted)' }}>
+                      Chuyển đổi engine cho mục đích kiểm thử / gỡ lỗi:
+                    </span>
+                    <button
+                      type="button"
+                      className="button secondary"
+                      aria-pressed={useMock}
+                      onClick={() => {
+                        if (busy) return
+                        setUseMock(!useMock)
+                        handleReset()
+                      }}
+                      disabled={busy}
+                      title={busy ? 'Không thể đổi engine trong khi truyền tệp' : undefined}
+                    >
+                      {useMock ? 'Chuyển sang Engine thật (Wails)' : 'Chuyển sang Chế độ mô phỏng'}
+                    </button>
+                  </div>
+                )}
+              </section>
+            </section>
+          )}
+
+          {/* Footer note matching mockup */}
+          <footer className="main-foot">
+            <svg className="icon" aria-hidden="true">
+              <use href="#i-preview" />
+            </svg>
+            <span>
+              {isDesktop && !useMock
+                ? 'CrocCoc Desktop v0.1.0 • Chuẩn truyền Croc PAKE'
+                : 'Bản mô phỏng không truyền dữ liệu.'}
+            </span>
+          </footer>
+        </main>
+      </div>
+    </div>
   )
 }

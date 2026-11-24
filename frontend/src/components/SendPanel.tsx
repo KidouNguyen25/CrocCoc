@@ -1,16 +1,17 @@
 import { useState, useRef } from 'react'
 import type { TransferUpdate } from '../transfer.ts'
+import { isRunning } from '../transfer.ts'
+import { formatBytes } from '../utils/formatters.ts'
 import { FileList } from './FileList.tsx'
 import type { SelectedFileItem } from './FileList.tsx'
 import { TransferProgress } from './TransferProgress.tsx'
+import logoMark from '../assets/croccoc-mark.svg'
 
 function sourceRootName(path: string): string {
   const trimmed = path.replace(/[/\\]+$/, '')
   return trimmed.split(/[/\\]/).pop() || trimmed
 }
 
-// The receiver publishes root names into one directory. Two distinct sources
-// with the same basename would collide there even if their full paths differ.
 function appendDistinctRoots(existing: SelectedFileItem[], incoming: SelectedFileItem[]): SelectedFileItem[] {
   const paths = new Set(existing.map((item) => item.path.replace(/[/\\]+$/, '').replace(/\//g, '\\').toLowerCase()))
   const roots = new Set(existing.map((item) => item.name.trim().toLowerCase()))
@@ -50,21 +51,25 @@ export function SendPanel({
   onReset,
 }: SendPanelProps) {
   const [items, setItems] = useState<SelectedFileItem[]>([])
-  const [manualPath, setManualPath] = useState('')
   const [isDragOver, setIsDragOver] = useState(false)
   const [errorMsg, setErrorMsg] = useState('')
+  const [copyStatus, setCopyStatus] = useState('')
 
   const fileInputRef = useRef<HTMLInputElement>(null)
   const folderInputRef = useRef<HTMLInputElement>(null)
 
   const state = update?.state ?? 'IDLE'
+  const activeCode = update?.connectionCode || connectionCode || ''
+  const hasCode = Boolean(activeCode)
+  const activeRunning = isRunning(state)
 
   const addItems = (incoming: SelectedFileItem[]) => {
-    // Keep the merge functional to preserve concurrent native picker updates.
     const preview = appendDistinctRoots(items, incoming)
-    setErrorMsg(preview.length < items.length + incoming.length
-      ? 'Đã bỏ qua mục có đường dẫn hoặc tên gốc trùng với mục đã chọn.'
-      : '')
+    setErrorMsg(
+      preview.length < items.length + incoming.length
+        ? 'Đã bỏ qua mục có đường dẫn hoặc tên gốc trùng với mục đã chọn.'
+        : '',
+    )
     setItems((prev) => appendDistinctRoots(prev, incoming))
   }
 
@@ -102,42 +107,38 @@ export function SendPanel({
     e.target.value = ''
   }
 
-  const handleAddManualPath = () => {
-    const trimmed = manualPath.trim()
-    if (!trimmed) return
-    const name = sourceRootName(trimmed)
-    addItems([{
-      id: `${trimmed}-${Date.now()}`,
-      name,
-      path: trimmed,
-      size: undefined,
-      isDirectory: false,
-    }])
-    setManualPath('')
-  }
-
   const handleNativeSelect = async (kind: 'sendFiles' | 'sendDirectory') => {
     if (!onSelectPaths) return
     try {
       const paths = await onSelectPaths(kind)
-      if (paths.length === 0) return // user cancelled picker
-      addItems(paths.filter(Boolean).map((path, index) => ({
-        id: `${path}-${Date.now()}-${index}`,
-        path,
-        name: sourceRootName(path),
-        isDirectory: kind === 'sendDirectory',
-      })))
+      if (paths.length === 0) return
+      addItems(
+        paths.filter(Boolean).map((path, index) => ({
+          id: `${path}-${Date.now()}-${index}`,
+          path,
+          name: sourceRootName(path),
+          isDirectory: kind === 'sendDirectory',
+        })),
+      )
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Không thể chọn đường dẫn.')
     }
   }
 
-  const handleRemoveItem = (id: string) => {
-    setItems((prev) => prev.filter((item) => item.id !== id))
+  const handleSampleFiles = () => {
+    addItems([
+      {
+        id: 'sample-zip',
+        name: 'CrocCoc-demo.zip',
+        path: 'CrocCoc-demo.zip',
+        size: 2654208,
+        isDirectory: false,
+      },
+    ])
   }
 
-  const handleClearItems = () => {
-    setItems([])
+  const handleRemoveItem = (id: string) => {
+    setItems((prev) => prev.filter((item) => item.id !== id))
   }
 
   const handleDrop = (e: React.DragEvent) => {
@@ -166,6 +167,7 @@ export function SendPanel({
       return
     }
     setErrorMsg('')
+    setCopyStatus('')
     const paths = items.map((i) => i.path)
     try {
       await onStartSend(paths)
@@ -174,161 +176,264 @@ export function SendPanel({
     }
   }
 
+  const handleCopy = async () => {
+    if (!activeCode) return
+    if (!isMock && onCopySendCode) {
+      try {
+        await onCopySendCode()
+        setCopyStatus('Đã sao chép mã an toàn.')
+      } catch {
+        setCopyStatus('Không thể sao chép an toàn. Vui lòng đọc mã trực tiếp trên màn hình.')
+      }
+      return
+    }
+    try {
+      await navigator.clipboard.writeText(activeCode)
+      setCopyStatus('Đã sao chép mã.')
+    } catch {
+      setCopyStatus('Mã đã sẵn sàng. Hãy chọn và sao chép thủ công.')
+    }
+  }
+
   const handleResetAll = () => {
     onReset()
     setItems([])
     setErrorMsg('')
+    setCopyStatus('')
   }
 
+  const totalSize = items.reduce((sum, item) => sum + (item.size ?? 0), 0)
+  const selectionSummary = items.length === 0
+    ? 'Chưa chọn tệp'
+    : `${items.length} tệp / ${formatBytes(totalSize)}`
+
+  let sendStateText = 'Chưa tạo'
+  if (hasCode) sendStateText = 'Sẵn sàng'
+  if (state === 'TRANSFERRING') sendStateText = 'Đang truyền'
+  if (state === 'COMPLETED') sendStateText = 'Hoàn tất'
+  if (state === 'FAILED') sendStateText = 'Lỗi'
+  if (state === 'CANCELLED') sendStateText = 'Đã hủy'
+
+  const noteText = copyStatus || (
+    hasCode
+      ? 'Dùng mã này để kết nối ở màn hình Nhận tệp.'
+      : 'Mã sẽ xuất hiện sau khi chọn tệp và bấm Tạo mã.'
+  )
+
   return (
-    <div className="panel-content send-panel" aria-label="Bảng gửi tệp">
-      {/* Hidden native inputs */}
+    <section className="screen" id="gui" aria-labelledby="send-title">
+      <header className="intro">
+        <h1 id="send-title" tabIndex={-1}>
+          Gửi tệp
+        </h1>
+        <p>Chọn tệp, tạo mã và chia sẻ với người nhận.</p>
+      </header>
+
+      {/* Hidden inputs */}
       <input
         ref={fileInputRef}
+        id="picker"
         type="file"
         multiple
-        style={{ display: 'none' }}
+        hidden
         onChange={handleFilesAdded}
       />
       <input
         ref={folderInputRef}
         type="file"
-        // @ts-expect-error webkitdirectory attribute is standard in browsers for directory picker
+        // @ts-expect-error webkitdirectory is standard for folder picker
         webkitdirectory=""
-        style={{ display: 'none' }}
+        hidden
         onChange={handleFolderAdded}
       />
 
-      {/* When IDLE: Show file selector and list */}
-      {state === 'IDLE' && (
-        <div className="selector-area">
-          <div
-            className={`dropzone ${isDragOver ? 'dropzone-active' : ''}`}
-            onDragOver={(e) => {
-              e.preventDefault()
-              setIsDragOver(true)
-            }}
-            onDragLeave={() => setIsDragOver(false)}
-            onDrop={handleDrop}
-          >
-            <div className="dropzone-icon" aria-hidden="true">
-              📦
-            </div>
-            <h3 className="dropzone-title">{onSelectPaths ? 'Chọn tệp hoặc thư mục trên máy tính' : 'Kéo thả tệp hoặc thư mục vào đây'}</h3>
-            <p className="dropzone-sub">Hỗ trợ gửi nhiều tệp hoặc nguyên thư mục cùng lúc</p>
-            <div className="dropzone-buttons">
-              <button
-                type="button"
-                className="btn-select"
-                onClick={() => onSelectPaths ? void handleNativeSelect('sendFiles') : fileInputRef.current?.click()}
-                disabled={busy}
-              >
-                📄 Chọn tệp
-              </button>
-              <button
-                type="button"
-                className="btn-select"
-                onClick={() => onSelectPaths ? void handleNativeSelect('sendDirectory') : folderInputRef.current?.click()}
-                disabled={busy}
-              >
-                📁 Chọn thư mục
-              </button>
-            </div>
-          </div>
-
-          {/* Manual path entry (useful for desktop or custom paths) */}
-          <div className="manual-path-box">
-            <input
-              type="text"
-              className="text-input"
-              placeholder="Hoặc nhập đường dẫn tệp/thư mục (VD: C:\data\file.zip)"
-              value={manualPath}
-              onChange={(e) => setManualPath(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleAddManualPath()}
-              disabled={busy}
-            />
+      <div className="send-grid">
+        {/* Left: Queue Panel */}
+        <section className="panel queue" aria-labelledby="files-title" data-over={isDragOver ? '' : undefined}>
+          <div className="panel-head">
+            <h2 id="files-title">Tệp gửi</h2>
             <button
               type="button"
-              className="btn-secondary"
-              onClick={handleAddManualPath}
-              disabled={busy || !manualPath.trim()}
+              className="sample"
+              id="sample"
+              onClick={handleSampleFiles}
+              disabled={busy}
             >
-              Thêm
+              Dùng tệp mẫu
             </button>
           </div>
 
-          {/* Mock mode convenience helper */}
-          {isMock && items.length === 0 && (
-            <div className="mock-quick-actions">
-              <span>Gợi ý thử nghiệm: </span>
-              <button
-                type="button"
-                className="btn-link"
-                onClick={() =>
-                  setItems([
-                    {
-                      id: 'sample-1',
-                      name: 'tai-lieu-bao-cao.pdf',
-                      path: 'tai-lieu-bao-cao.pdf',
-                      size: 2450000,
-                      isDirectory: false,
-                    },
-                    {
-                      id: 'sample-2',
-                      name: 'anh-chup-man-hinh.png',
-                      path: 'anh-chup-man-hinh.png',
-                      size: 1120000,
-                      isDirectory: false,
-                    },
-                  ])
-                }
-              >
-                Thêm tệp mẫu
-              </button>
+          {items.length === 0 ? (
+            <div
+              className="drop"
+              id="drop"
+              data-over={isDragOver ? '' : undefined}
+              onDragOver={(e) => {
+                e.preventDefault()
+                setIsDragOver(true)
+              }}
+              onDragLeave={() => setIsDragOver(false)}
+              onDrop={handleDrop}
+            >
+              <div className="drop-icon">
+                <svg className="icon" aria-hidden="true">
+                  <use href="#i-upload" />
+                </svg>
+              </div>
+              <p>
+                <strong>Kéo và thả tệp vào đây</strong>
+              </p>
+              <div className="drop-actions">
+                <button
+                  type="button"
+                  className="button primary"
+                  id="pick"
+                  onClick={() =>
+                    onSelectPaths ? void handleNativeSelect('sendFiles') : fileInputRef.current?.click()
+                  }
+                  disabled={busy}
+                >
+                  Chọn tệp
+                </button>
+                {onSelectPaths && (
+                  <button
+                    type="button"
+                    className="button secondary"
+                    onClick={() => void handleNativeSelect('sendDirectory')}
+                    disabled={busy}
+                  >
+                    Chọn thư mục
+                  </button>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div id="queue-items">
+              <FileList items={items} onRemove={handleRemoveItem} disabled={busy} />
+              <div className="queue-actions">
+                <button
+                  type="button"
+                  className="button secondary"
+                  id="pick-more"
+                  onClick={() =>
+                    onSelectPaths ? void handleNativeSelect('sendFiles') : fileInputRef.current?.click()
+                  }
+                  disabled={busy}
+                >
+                  Thêm tệp
+                </button>
+                {onSelectPaths && (
+                  <button
+                    type="button"
+                    className="button secondary"
+                    onClick={() => void handleNativeSelect('sendDirectory')}
+                    disabled={busy}
+                  >
+                    Thêm thư mục
+                  </button>
+                )}
+              </div>
             </div>
           )}
 
-          {/* Selected files list */}
-          <FileList
-            items={items}
-            onRemove={handleRemoveItem}
-            onClear={handleClearItems}
-            disabled={busy}
-          />
-
           {errorMsg && (
-            <div className="error-alert" role="alert">
-              <span className="error-icon">⚠</span>
+            <div className="error-alert" role="alert" style={{ marginTop: '16px' }}>
               <span>{errorMsg}</span>
             </div>
           )}
 
-          {/* Action button */}
-          <div className="action-row">
+          <div className="panel-foot">
+            <span id="selection" role="status">
+              {selectionSummary}
+            </span>
+            {!activeRunning ? (
+              <button
+                type="button"
+                className="button primary"
+                id="start"
+                disabled={items.length === 0 || busy}
+                onClick={() => void handleStart()}
+              >
+                Tạo mã{' '}
+                <svg className="icon" aria-hidden="true">
+                  <use href="#i-arrow" />
+                </svg>
+              </button>
+            ) : (
+              <button type="button" className="button danger" onClick={onCancel}>
+                Hủy phiên
+              </button>
+            )}
+          </div>
+        </section>
+
+        {/* Right: Handoff Panel */}
+        <section className="panel handoff" aria-labelledby="handoff-title">
+          <div className="panel-head">
+            <h2 id="handoff-title">Mã kết nối</h2>
+            <span className="state" id="send-state" data-ready={hasCode ? '' : undefined}>
+              {sendStateText}
+            </span>
+          </div>
+
+          <div className="handoff-diagram" aria-hidden="true">
+            <div className="endpoint origin">
+              <img src={logoMark} width="43" height="34" alt="" />
+            </div>
+            <div className="handoff-line">
+              <svg className="icon" aria-hidden="true">
+                <use href="#i-arrow" />
+              </svg>
+            </div>
+            <div className="endpoint destination">
+              <svg className="icon" aria-hidden="true">
+                <use href="#i-receive" />
+              </svg>
+            </div>
+          </div>
+
+          <div className="code-slot">
+            <output
+              id="send-code"
+              aria-label="Mã kết nối"
+              role="status"
+              data-ready={hasCode ? '' : undefined}
+            >
+              {activeCode || '— — —'}
+            </output>
             <button
               type="button"
-              className="btn-primary btn-large btn-send"
-              onClick={() => void handleStart()}
-              disabled={busy || items.length === 0}
+              className="icon-button"
+              id="copy"
+              aria-label="Sao chép mã"
+              title="Sao chép mã"
+              disabled={!hasCode}
+              onClick={() => void handleCopy()}
             >
-              🚀 Bắt đầu gửi ({items.length} mục)
+              <svg className="icon" aria-hidden="true">
+                <use href="#i-copy" />
+              </svg>
             </button>
           </div>
-        </div>
-      )}
 
-      {/* When running or finished: Show TransferProgress */}
-      {state !== 'IDLE' && (
-        <TransferProgress
-          update={update}
-          connectionCode={connectionCode}
-          direction="send"
-          isDesktop={!isMock}
-          onCopySendCode={onCopySendCode}
-          onCancel={onCancel}
-          onReset={handleResetAll}
-        />
-      )}
-    </div>
+          <p className="panel-note" id="copy-status" role="status">
+            {noteText}
+          </p>
+
+          {/* Transfer status and metrics during active/finished transfer */}
+          {state !== 'IDLE' && (
+            <TransferProgress
+              update={update}
+              connectionCode={connectionCode}
+              direction="send"
+              isDesktop={!isMock}
+              onCopySendCode={onCopySendCode}
+              onCancel={onCancel}
+              onReset={handleResetAll}
+            />
+          )}
+        </section>
+      </div>
+    </section>
   )
 }
