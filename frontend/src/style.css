@@ -155,7 +155,8 @@ h1, h2, h3 {
 .preview-tag {
   align-items: center;
   display: inline-flex;
-  flex: 0 0 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
   gap: 8px;
   color: var(--muted);
   font-size: 13px;
@@ -200,7 +201,6 @@ nav button {
   font-size: 14px;
   width: 100%;
   text-align: left;
-  border: 1px solid transparent;
   transition: background 0.15s, color 0.15s;
 }
 
@@ -232,7 +232,7 @@ nav button.active, nav button[aria-current="page"] {
 /* Main Area */
 main {
   width: min(100%, 1152px);
-  padding: 48px clamp(20px, 4vw, 56px) 32px;
+  padding: 56px clamp(24px, 4vw, 64px) 32px;
   margin-inline: auto;
   display: flex;
   flex-direction: column;
@@ -242,21 +242,14 @@ main {
 .screen {
   display: flex;
   flex-direction: column;
-  gap: 24px;
-  animation: fadeIn 0.15s ease-out;
-}
-
-@keyframes fadeIn {
-  from { opacity: 0; transform: translateY(4px); }
-  to { opacity: 1; transform: translateY(0); }
 }
 
 .intro {
-  margin-bottom: 8px;
+  margin-bottom: 32px;
 }
 
 .intro h1 {
-  font-size: clamp(36px, 4.5vw, 56px);
+  font-size: clamp(40px, 5vw, 64px);
   line-height: 1.12;
   letter-spacing: -.052em;
   font-weight: 650;
@@ -265,9 +258,9 @@ main {
 
 .intro p {
   margin: 0;
-  max-width: 58ch;
+  max-width: 52ch;
   color: var(--muted);
-  font-size: 15px;
+  font-size: 16px;
 }
 
 /* Grid & Panels */
@@ -421,7 +414,6 @@ main {
 
 .drop strong {
   font-weight: 550;
-  color: var(--ink);
 }
 
 .drop-icon {
@@ -546,7 +538,6 @@ main {
   color: var(--muted);
   font-size: 13px;
   margin: 12px 0 0;
-  line-height: 1.45;
 }
 
 /* Form Panel */
@@ -601,6 +592,15 @@ main {
   flex: 1;
 }
 
+.preview-form .panel-foot {
+  justify-content: flex-start;
+  margin-top: 16px;
+}
+
+.preview-form .panel-foot > span {
+  display: none;
+}
+
 /* File List & Spec List */
 .file-list, .spec-list {
   list-style: none;
@@ -613,7 +613,7 @@ main {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  min-height: 52px;
+  min-height: 56px;
   padding: 8px 0;
   border-top: 1px solid var(--rule);
 }
@@ -639,8 +639,6 @@ main {
 
 .spec-list dd {
   margin: 0;
-  font-family: var(--code-font);
-  color: var(--ink);
 }
 
 .empty {

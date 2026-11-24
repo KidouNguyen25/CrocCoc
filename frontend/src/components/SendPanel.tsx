@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import type { TransferUpdate } from '../transfer.ts'
 import { isRunning } from '../transfer.ts'
 import { formatBytes } from '../utils/formatters.ts'
@@ -28,6 +28,7 @@ function appendDistinctRoots(existing: SelectedFileItem[], incoming: SelectedFil
 }
 
 interface SendPanelProps {
+  hidden: boolean
   update?: TransferUpdate
   connectionCode?: string
   busy: boolean
@@ -40,6 +41,7 @@ interface SendPanelProps {
 }
 
 export function SendPanel({
+  hidden,
   update,
   connectionCode,
   busy,
@@ -56,6 +58,12 @@ export function SendPanel({
   const [copyStatus, setCopyStatus] = useState('')
 
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const startButtonRef = useRef<HTMLButtonElement>(null)
+  const hasItems = items.length > 0
+  useEffect(() => {
+    if (hasItems) startButtonRef.current?.focus()
+  }, [hasItems])
+
   const folderInputRef = useRef<HTMLInputElement>(null)
 
   const state = update?.state ?? 'IDLE'
@@ -216,12 +224,12 @@ export function SendPanel({
 
   const noteText = copyStatus || (
     hasCode
-      ? 'Dùng mã này để kết nối ở màn hình Nhận tệp.'
-      : 'Mã sẽ xuất hiện sau khi chọn tệp và bấm Tạo mã.'
+      ? (isMock ? 'Dùng mã này để thử màn hình Nhận tệp.' : 'Gửi mã này cho người nhận.')
+      : (isMock ? 'Mã sẽ xuất hiện sau khi chọn tệp và tạo mã mẫu.' : 'Mã sẽ xuất hiện sau khi chọn tệp và bấm Tạo mã.')
   )
 
   return (
-    <section className="screen" id="gui" aria-labelledby="send-title">
+    <section className="screen" id="gui" aria-labelledby="send-title" hidden={hidden}>
       <header className="intro">
         <h1 id="send-title" tabIndex={-1}>
           Gửi tệp
@@ -252,15 +260,17 @@ export function SendPanel({
         <section className="panel queue" aria-labelledby="files-title" data-over={isDragOver ? '' : undefined}>
           <div className="panel-head">
             <h2 id="files-title">Tệp gửi</h2>
-            <button
-              type="button"
-              className="sample"
-              id="sample"
-              onClick={handleSampleFiles}
-              disabled={busy}
-            >
-              Dùng tệp mẫu
-            </button>
+            {isMock && (
+              <button
+                type="button"
+                className="sample"
+                id="sample"
+                onClick={handleSampleFiles}
+                disabled={busy}
+              >
+                Dùng tệp mẫu
+              </button>
+            )}
           </div>
 
           {items.length === 0 ? (
@@ -351,10 +361,11 @@ export function SendPanel({
                 type="button"
                 className="button primary"
                 id="start"
+                ref={startButtonRef}
                 disabled={items.length === 0 || busy}
                 onClick={() => void handleStart()}
               >
-                Tạo mã{' '}
+                {isMock ? 'Tạo mã mẫu' : 'Tạo mã'}
                 <svg className="icon" aria-hidden="true">
                   <use href="#i-arrow" />
                 </svg>

@@ -3,7 +3,7 @@ export type AppRoute = 'gui' | 'nhan' | 'phien' | 'engine'
 export interface SidebarRailProps {
   activeRoute: AppRoute
   onRouteChange: (route: AppRoute) => void
-  disabled?: boolean
+  blockedRoute?: AppRoute
   isDesktop?: boolean
   isMock?: boolean
   crocAvailable?: boolean
@@ -13,7 +13,7 @@ export interface SidebarRailProps {
 export function SidebarRail({
   activeRoute,
   onRouteChange,
-  disabled = false,
+  blockedRoute,
   isDesktop = false,
   isMock = true,
   crocAvailable = false,
@@ -43,11 +43,8 @@ export function SidebarRail({
             type="button"
             className={activeRoute === r.id ? 'active' : ''}
             aria-current={activeRoute === r.id ? 'page' : undefined}
-            onClick={() => {
-              if (disabled && (r.id === 'gui' || r.id === 'nhan') && activeRoute !== r.id) return
-              onRouteChange(r.id)
-            }}
-            disabled={disabled && (r.id === 'gui' || r.id === 'nhan') && activeRoute !== r.id}
+            onClick={() => onRouteChange(r.id)}
+            disabled={r.id === blockedRoute}
           >
             <svg className="icon" aria-hidden="true">
               <use href={`#${r.iconId}`} />
@@ -81,7 +78,7 @@ export function ModeSwitcher({
         if (r === 'gui') onModeChange('send')
         else if (r === 'nhan') onModeChange('receive')
       }}
-      disabled={disabled}
+      blockedRoute={disabled ? (mode === 'send' ? 'nhan' : 'gui') : undefined}
     />
   )
 }

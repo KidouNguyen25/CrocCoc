@@ -52,33 +52,20 @@ export function App() {
   const mockClient = useMemo(() => createMockTransferClient(), [])
   const clientRef = useRef<TransferClient>(mockClient)
   const trackerRef = useRef(createTransferSessionTracker())
+  const sessionRef = useRef<Pick<SessionHistoryItem, 'direction' | 'label'> & { mock: boolean }>(null)
+  const mainRef = useRef<HTMLElement>(null)
+  const previousRoute = useRef(route)
   const snapshotInFlightRef = useRef<{ transferID: string; promise: Promise<SnapshotProbeResult> } | null>(null)
-
-  // Listen to hash change for navigation
-  useEffect(() => {
-    const handleHash = () => {
-      const hash = window.location.hash.replace(/^#/, '')
-      if (hash === 'gui' || hash === 'nhan' || hash === 'phien' || hash === 'engine') {
-        setRoute(hash as AppRoute)
-      }
-    }
-    handleHash()
-    window.addEventListener('hashchange', handleHash)
-    return () => window.removeEventListener('hashchange', handleHash)
-  }, [])
-
-  const changeRoute = (nextRoute: AppRoute) => {
-    setRoute(nextRoute)
-    window.location.hash = nextRoute
-  }
 
   const recordSession = (
     transferID: string,
-    direction: 'send' | 'receive',
-    label: string,
-    code: string,
     state: string,
+    code = '',
   ) => {
+    const session = sessionRef.current
+    if (!session) return
+    const { direction, label, mock } = session
+    const sampleCode = mock ? code : ''
     const timeStr = new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })
     setSessions((prev) => {
       const existingIdx = prev.findIndex((s) => s.id === transferID)
@@ -87,7 +74,7 @@ export function App() {
         const copy = [...prev]
         copy[existingIdx] = {
           ...copy[existingIdx],
-          code: code || copy[existingIdx].code,
+          code: sampleCode || copy[existingIdx].code,
           status: state,
           statusText,
         }
@@ -98,7 +85,7 @@ export function App() {
           id: transferID,
           direction,
           label,
-          code: code || '—',
+          code: sampleCode,
           timestamp: timeStr,
           status: state,
           statusText,
@@ -123,13 +110,7 @@ export function App() {
     }
 
     if (next.transferID) {
-      recordSession(
-        next.transferID,
-        route === 'nhan' ? 'receive' : 'send',
-        route === 'nhan' ? 'Nhận tệp' : 'Gửi tệp',
-        next.connectionCode || connectionCode,
-        next.state,
-      )
+      recordSession(next.transferID, next.state, next.connectionCode)
     }
   }
 
@@ -179,9 +160,42 @@ export function App() {
 
   const state = update?.state ?? 'IDLE'
   const busy = !canToggleMockMode(pending, state)
+  const activeRoute = sessionRef.current?.direction === 'receive' ? 'nhan' : 'gui'
+  const blockedRoute = busy ? (activeRoute === 'gui' ? 'nhan' : 'gui') : undefined
   const activeTransferID = update?.transferID
   const activeRunning = Boolean(activeTransferID && isRunning(state))
   const displayedError = trackingError || appError
+
+  useEffect(() => {
+    const handleHash = () => {
+      const hash = window.location.hash.slice(1)
+      const nextRoute = hash === 'nhan' || hash === 'phien' || hash === 'engine' ? hash : 'gui'
+      if (nextRoute === blockedRoute) {
+        window.history.replaceState(null, '', '#' + activeRoute)
+        setRoute(activeRoute)
+        return
+      }
+      setRoute(nextRoute)
+    }
+    handleHash()
+    window.addEventListener('hashchange', handleHash)
+    return () => window.removeEventListener('hashchange', handleHash)
+  }, [activeRoute, blockedRoute])
+
+  useEffect(() => {
+    const heading = mainRef.current?.querySelector<HTMLElement>(`#${route} .intro h1`)
+    if (!heading) return
+    document.title = `CrocCoc — ${heading.textContent}`
+    if (previousRoute.current !== route) {
+      previousRoute.current = route
+      heading.focus({ preventScroll: true })
+      window.scrollTo(0, 0)
+    }
+  }, [route])
+
+  const changeRoute = (nextRoute: AppRoute) => {
+    if (nextRoute !== blockedRoute) window.location.hash = nextRoute
+  }
 
   const probeSnapshot = (
     transferID: string,
@@ -284,6 +298,7 @@ export function App() {
     direction: 'send' | 'receive',
     label: string,
   ) => {
+    sessionRef.current = { direction, label, mock: !isDesktop }
     trackerRef.current.beginStart()
     snapshotInFlightRef.current = null
     setPending(true)
@@ -297,8 +312,8 @@ export function App() {
     try {
       const transferID = await request()
       const { update: started } = trackerRef.current.resolveStart(transferID)
-      applyTrackedUpdate(started)
-      recordSession(transferID, direction, label, '', started?.state || 'PREPARING')
+      if (started) applyTrackedUpdate(started)
+      else recordSession(transferID, 'PREPARING')
       void probeSnapshot(transferID, false)
     } catch (err) {
       trackerRef.current.failStart()
@@ -464,7 +479,7 @@ export function App() {
         <SidebarRail
           activeRoute={route}
           onRouteChange={changeRoute}
-          disabled={busy}
+          blockedRoute={blockedRoute}
           isDesktop={isDesktop}
           isMock={!isDesktop || useMock}
           crocAvailable={crocInfo?.available}
@@ -472,7 +487,7 @@ export function App() {
         />
 
         {/* Main Content Screens */}
-        <main>
+        <main ref={mainRef}>
           {displayedError && (
             <div className="error-alert top-alert" role="alert">
               <span>{displayedError}</span>
@@ -523,26 +538,26 @@ export function App() {
           )}
 
           {/* Screen 1: Gửi tệp (#gui) */}
-          {route === 'gui' && (
-            <SendPanel
-              update={update}
-              connectionCode={connectionCode}
-              busy={busy}
-              isMock={!isDesktop || useMock}
-              onStartSend={handleStartSend}
-              onSelectPaths={isDesktop && !useMock ? handleSelectPaths : undefined}
-              onCopySendCode={isDesktop && !useMock ? handleCopySendCode : undefined}
-              onCancel={handleCancel}
-              onReset={handleReset}
-            />
-          )}
+          <SendPanel
+            key={isDesktop ? 'desktop' : 'mock'}
+            hidden={route !== 'gui'}
+            update={activeRoute === 'gui' && route === 'gui' ? update : undefined}
+            connectionCode={activeRoute === 'gui' && route === 'gui' ? connectionCode : undefined}
+            busy={busy}
+            isMock={!isDesktop}
+            onStartSend={handleStartSend}
+            onSelectPaths={isDesktop ? handleSelectPaths : undefined}
+            onCopySendCode={isDesktop ? handleCopySendCode : undefined}
+            onCancel={handleCancel}
+            onReset={handleReset}
+          />
 
           {/* Screen 2: Nhận tệp (#nhan) */}
           {route === 'nhan' && (
             <ReceivePanel
-              update={update}
+              update={activeRoute === 'nhan' ? update : undefined}
               busy={busy}
-              isMock={!isDesktop || useMock}
+              isMock={!isDesktop}
               onStartReceive={handleStartReceive}
               onSelectReceiveDirectory={isDesktop && !useMock ? () => handleSelectPaths('receiveDirectory') : undefined}
               onDecideReceive={handleDecideReceive}
@@ -558,12 +573,12 @@ export function App() {
                 <h1 id="history-title" tabIndex={-1}>
                   Phiên truyền
                 </h1>
-                <p>Xem các phiên truyền được tạo trong lần mở này.</p>
+                <p>Xem các phiên {isDesktop ? 'truyền' : 'mẫu'} được tạo trong lần mở này.</p>
               </header>
 
               <section className="panel narrow" aria-labelledby="history-list-title">
                 <div className="panel-head">
-                  <h2 id="history-list-title">Lịch sử phiên truyền</h2>
+                  <h2 id="history-list-title">{isDesktop ? 'Lịch sử phiên truyền' : 'Lịch sử xem trước'}</h2>
                   <span className="state" id="history-count">
                     {sessions.length} phiên
                   </span>
@@ -591,7 +606,7 @@ export function App() {
                           </div>
                         </div>
                         <div className="file-meta">
-                          {item.code && item.code !== '—' && <code>{item.code} </code>}
+                          {item.code && <code>{item.code} </code>}
                           <span className={`session-badge badge-${item.status.toLowerCase()}`}>
                             {item.statusText}
                           </span>
@@ -611,41 +626,47 @@ export function App() {
                 <h1 id="engine-title" tabIndex={-1}>
                   Croc engine
                 </h1>
-                <p>Thông tin kết nối và cấu hình động cơ truyền tệp.</p>
+                <p>
+                  {isDesktop
+                    ? 'Thông tin kết nối và cấu hình động cơ truyền tệp.'
+                    : 'Thông tin kết nối sẽ được hiển thị khi tích hợp backend.'}
+                </p>
               </header>
 
               <section className="panel narrow" aria-labelledby="engine-status">
                 <div className="panel-head">
                   <h2 id="engine-status">Trạng thái</h2>
-                  <span className="state" data-ready={crocInfo?.available ? '' : undefined}>
-                    {crocInfo?.available ? 'Sẵn sàng' : 'Chưa kết nối'}
+                  <span className="state" data-ready={isDesktop && crocInfo?.available ? '' : undefined}>
+                    {isDesktop && crocInfo?.available ? 'Sẵn sàng' : 'Chưa kết nối'}
                   </span>
                 </div>
 
                 <dl className="spec-list">
                   <div>
                     <dt>Chương trình Croc</dt>
-                    <dd>
-                      {crocInfo?.version
-                        ? `Croc ${crocInfo.version}`
-                        : isDesktop
-                          ? 'Chưa phát hiện'
-                          : 'Chế độ mô phỏng (Mock)'}
-                    </dd>
+                    <dd>{isDesktop ? (crocInfo?.available ? 'Worker Go' : 'Chưa phát hiện') : 'Chưa kiểm tra'}</dd>
                   </div>
                   <div>
                     <dt>Đường dẫn cài đặt</dt>
-                    <dd>{isDesktop ? 'Tích hợp sẵn (Worker Go)' : 'Trình duyệt Web (Mock)'}</dd>
+                    <dd>{isDesktop && crocInfo?.available ? 'bin/croccoc-engine.exe' : 'Chưa xác định'}</dd>
                   </div>
                   <div>
-                    <dt>Máy chủ Relay</dt>
-                    <dd>{crocInfo?.relayLabel || 'Relay công cộng (Mặc định)'}</dd>
+                    <dt>Phiên bản</dt>
+                    <dd>{(isDesktop && crocInfo?.version) || 'Chưa xác định'}</dd>
                   </div>
-                  <div>
-                    <dt>Môi trường chạy</dt>
-                    <dd>{isDesktop ? 'Ứng dụng desktop (Wails IPC)' : 'Bản xem trước trình duyệt'}</dd>
-                  </div>
-                  {crocInfo?.message && (
+                  {isDesktop && crocInfo?.relayLabel && (
+                    <div>
+                      <dt>Máy chủ Relay</dt>
+                      <dd>{crocInfo.relayLabel}</dd>
+                    </div>
+                  )}
+                  {isDesktop && (
+                    <div>
+                      <dt>Môi trường chạy</dt>
+                      <dd>Ứng dụng desktop (Wails IPC)</dd>
+                    </div>
+                  )}
+                  {isDesktop && crocInfo?.message && (
                     <div>
                       <dt>Thông tin engine</dt>
                       <dd>{crocInfo.message}</dd>

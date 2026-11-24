@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { TransferUpdate } from '../transfer.ts'
 import { isRunning } from '../transfer.ts'
 import { SAMPLE_CODE } from '../mockTransfer.ts'
@@ -26,10 +26,11 @@ export function ReceivePanel({
   onCancel,
   onReset,
 }: ReceivePanelProps) {
+  const codeInputRef = useRef<HTMLInputElement>(null)
   const [code, setCode] = useState('')
   const [outputDir, setOutputDir] = useState('Downloads')
   const [errorMsg, setErrorMsg] = useState('')
-  const [feedback, setFeedback] = useState('Mã nhập chỉ được kiểm tra trong bản xem trước.')
+  const [feedback, setFeedback] = useState('')
   const [folderCopied, setFolderCopied] = useState(false)
 
   useEffect(() => {
@@ -56,7 +57,8 @@ export function ReceivePanel({
   const handleFillSample = () => {
     setCode(SAMPLE_CODE)
     setErrorMsg('')
-    setFeedback('Đã điền mã mẫu. Chọn Nhận tệp để tiếp tục.')
+    setFeedback('Đã điền mã mẫu. Chọn Kiểm tra mã để tiếp tục.')
+    codeInputRef.current?.focus()
   }
 
   const handleSelectFolder = async () => {
@@ -78,7 +80,8 @@ export function ReceivePanel({
     const trimmedDir = outputDir.trim()
 
     if (!trimmedCode) {
-      setErrorMsg('Nhập mã hoặc chọn Dùng mã mẫu.')
+      setErrorMsg(isMock ? 'Nhập mã hoặc chọn Dùng mã mẫu.' : 'Nhập mã kết nối.')
+      codeInputRef.current?.focus()
       return
     }
     if (!trimmedDir) {
@@ -90,6 +93,7 @@ export function ReceivePanel({
     try {
       await onStartReceive(trimmedCode, trimmedDir)
       setCode('') // Do not retain the secret passphrase in the input field
+      if (isMock) setFeedback('Đã nhận diện mã mẫu. Không có tệp nào được tải xuống.')
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Không thể bắt đầu phiên nhận.')
     }
@@ -109,7 +113,7 @@ export function ReceivePanel({
     onReset()
     setCode('')
     setErrorMsg('')
-    setFeedback('Mã nhập chỉ được kiểm tra trong bản xem trước.')
+    setFeedback('')
   }
 
   return (
@@ -121,31 +125,39 @@ export function ReceivePanel({
         <p>Nhập mã do người gửi cung cấp để bắt đầu.</p>
       </header>
 
-      <form className="panel narrow form-panel" id="receive-form" onSubmit={handleStart} noValidate>
+      <form
+        className={isMock ? 'panel narrow form-panel preview-form' : 'panel narrow form-panel'}
+        id="receive-form"
+        onSubmit={handleStart}
+        noValidate
+      >
         <div className="panel-head">
           <h2>Kết nối với người gửi</h2>
-          <button
-            type="button"
-            className="sample"
-            id="fill-code"
-            onClick={handleFillSample}
-            disabled={busy}
-          >
-            Dùng mã mẫu
-          </button>
+          {isMock && (
+            <button
+              type="button"
+              className="sample"
+              id="fill-code"
+              onClick={handleFillSample}
+              disabled={busy}
+            >
+              Dùng mã mẫu
+            </button>
+          )}
         </div>
 
         <label htmlFor="receive-code">Mã Croc</label>
         <div className="code-input-group">
           <input
             id="receive-code"
+            ref={codeInputRef}
             type="text"
             placeholder="Nhập mã kết nối"
             value={code}
             onChange={(e) => {
               setCode(e.target.value)
               setErrorMsg('')
-              setFeedback(isMock ? 'Mã nhập chỉ được kiểm tra trong bản xem trước.' : 'Nhập mã kết nối an toàn.')
+              setFeedback('')
             }}
             autoComplete="off"
             spellCheck="false"
@@ -154,40 +166,46 @@ export function ReceivePanel({
             aria-invalid={Boolean(errorMsg)}
             aria-describedby="receive-feedback"
           />
-          <button
-            type="button"
-            className="button secondary"
-            onClick={() => void handlePasteCode()}
-            disabled={busy}
-            title="Dán từ clipboard"
-          >
-            Dán
-          </button>
-        </div>
-
-        <label htmlFor="receive-dir" style={{ marginTop: '16px' }}>
-          Thư mục lưu tệp
-        </label>
-        <div className="dir-input-group">
-          <input
-            id="receive-dir"
-            type="text"
-            placeholder={onSelectReceiveDirectory ? 'Chọn thư mục lưu trên máy tính' : 'Thư mục nhận (VD: Downloads)'}
-            value={outputDir}
-            onChange={(e) => setOutputDir(e.target.value)}
-            disabled={busy}
-          />
-          {onSelectReceiveDirectory && (
+          {!isMock && (
             <button
               type="button"
               className="button secondary"
-              onClick={() => void handleSelectFolder()}
+              onClick={() => void handlePasteCode()}
               disabled={busy}
+              title="Dán từ clipboard"
             >
-              Chọn
+              Dán
             </button>
           )}
         </div>
+
+        {!isMock && (
+          <>
+            <label htmlFor="receive-dir" style={{ marginTop: '16px' }}>
+              Thư mục lưu tệp
+            </label>
+            <div className="dir-input-group">
+              <input
+                id="receive-dir"
+                type="text"
+                placeholder={onSelectReceiveDirectory ? 'Chọn thư mục lưu trên máy tính' : 'Thư mục nhận (VD: Downloads)'}
+                value={outputDir}
+                onChange={(e) => setOutputDir(e.target.value)}
+                disabled={busy}
+              />
+              {onSelectReceiveDirectory && (
+                <button
+                  type="button"
+                  className="button secondary"
+                  onClick={() => void handleSelectFolder()}
+                  disabled={busy}
+                >
+                  Chọn
+                </button>
+              )}
+            </div>
+          </>
+        )}
 
         {errorMsg ? (
           <p className="panel-note" id="receive-feedback" role="status" data-error="">
@@ -195,7 +213,7 @@ export function ReceivePanel({
           </p>
         ) : (
           <p className="panel-note" id="receive-feedback" role="status">
-            {feedback}
+            {feedback || (isMock ? 'Mã nhập chỉ được kiểm tra trong bản xem trước.' : 'Nhập mã kết nối an toàn.')}
           </p>
         )}
 
@@ -205,9 +223,9 @@ export function ReceivePanel({
             <button
               className="button primary"
               type="submit"
-              disabled={busy || !code.trim() || !outputDir.trim()}
+              disabled={busy || (!isMock && (!code.trim() || !outputDir.trim()))}
             >
-              Nhận tệp{' '}
+              {isMock ? 'Kiểm tra mã' : 'Nhận tệp'}
               <svg className="icon" aria-hidden="true">
                 <use href="#i-arrow" />
               </svg>
@@ -231,7 +249,7 @@ export function ReceivePanel({
             onReset={handleResetAll}
           />
 
-          {state === 'COMPLETED' && (
+          {state === 'COMPLETED' && !isMock && (
             <div style={{ marginTop: '16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
               <span style={{ fontSize: '13px', color: 'var(--muted)' }}>
                 Đã lưu tại: <code style={{ color: 'var(--leaf)' }}>{outputDir}</code>
