@@ -100,7 +100,12 @@ try {
 } finally { $archive.Dispose() }
 foreach ($path in @((Join-Path $stage "CrocCoc.exe"), $installer)) {
     $v = (Get-Item -LiteralPath $path).VersionInfo
-    if ("$($v.ProductMajorPart).$($v.ProductMinorPart).$($v.ProductBuildPart)" -ne $app) { throw "Executable product version mismatch: $path" }
+    $productVersion = "$($v.ProductMajorPart).$($v.ProductMinorPart).$($v.ProductBuildPart).$($v.ProductPrivatePart)"
+    $fileVersion = "$($v.FileMajorPart).$($v.FileMinorPart).$($v.FileBuildPart).$($v.FilePrivatePart)"
+    Write-Output "PE version $([IO.Path]::GetFileName($path)): product=$productVersion file=$fileVersion expected=$app.0"
+    if ($productVersion -cne "$app.0" -or $fileVersion -cne "$app.0") {
+        throw "Executable version mismatch: $path (product=$productVersion file=$fileVersion expected=$app.0)"
+    }
 }
 $downloadChecksums = @(Get-Content -LiteralPath (Join-Path $release "download-SHA256SUMS.txt"))
 if ($downloadChecksums.Count -ne 2) { throw "Unexpected download checksum count." }

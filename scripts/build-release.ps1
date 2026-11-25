@@ -82,6 +82,13 @@ Copy-Item -LiteralPath (Join-Path $repoRoot "branding/croccoc-mark.png") -Destin
 Invoke-Native wails @("build", "-platform", "windows/amd64", "-clean")
 $exe = Join-Path $repoRoot "build\bin\CrocCoc.exe"
 if (-not (Test-Path -LiteralPath $exe)) { throw "Không thấy build\bin\CrocCoc.exe sau khi build." }
+$peVersion = (Get-Item -LiteralPath $exe).VersionInfo
+$actualProduct = "$($peVersion.ProductMajorPart).$($peVersion.ProductMinorPart).$($peVersion.ProductBuildPart).$($peVersion.ProductPrivatePart)"
+$actualFile = "$($peVersion.FileMajorPart).$($peVersion.FileMinorPart).$($peVersion.FileBuildPart).$($peVersion.FilePrivatePart)"
+if ($actualProduct -cne "$appVersion.0" -or $actualFile -cne "$appVersion.0") {
+    throw "Built host version mismatch: product=$actualProduct file=$actualFile expected=$appVersion.0"
+}
+Write-Output "Built host version: product=$actualProduct file=$actualFile"
 
 # 6. Xếp gói: CrocCoc.exe cạnh bin\croccoc-engine.exe (main.go tìm worker ở đúng vị trí này).
 $packageName = "CrocCoc-$releaseVersion-win64"
