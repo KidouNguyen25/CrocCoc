@@ -17,6 +17,17 @@ interface WailsHost {
   runtime?: { EventsOn?: (event: string, handler: (update: TransferUpdate) => void) => () => void }
 }
 
+// Mocking is a development-only choice, never an implicit production fallback.
+export function resolveRuntimeMode(
+  desktopAvailable: boolean,
+  nativeHostPresent: boolean,
+  development: boolean,
+  mockRequested: boolean,
+): 'desktop' | 'mock' | 'unavailable' {
+  if (desktopAvailable) return development && mockRequested ? 'mock' : 'desktop'
+  return development && !nativeHostPresent ? 'mock' : 'unavailable'
+}
+
 function missingBinding(name: string): Promise<never> {
   return Promise.reject(new Error(`ENGINE_UNAVAILABLE: thiếu Wails binding ${name}.`))
 }

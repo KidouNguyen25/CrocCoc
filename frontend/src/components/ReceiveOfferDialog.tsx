@@ -6,9 +6,10 @@ interface ReceiveOfferDialogProps {
   offer: ReceiveOffer
   onDecide: (accept: boolean) => void
   disabled?: boolean
+  error?: string
 }
 
-export function ReceiveOfferDialog({ offer, onDecide, disabled = false }: ReceiveOfferDialogProps) {
+export function ReceiveOfferDialog({ offer, onDecide, disabled = false, error }: ReceiveOfferDialogProps) {
   const { fileCount, totalBytes, items, expiresAt } = offer
   const dialogRef = useRef<HTMLDivElement>(null)
   const previouslyFocused = useRef<HTMLElement | null>(null)
@@ -102,6 +103,7 @@ export function ReceiveOfferDialog({ offer, onDecide, disabled = false }: Receiv
           </ul>
         </div>
 
+        {error && <p role="alert" className="panel-note" data-error="">{error}</p>}
         <div className="offer-actions">
           <button
             type="button"

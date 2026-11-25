@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useRef, useState } from 'react'
 import type { TransferUpdate } from '../transfer.ts'
 import { isRunning } from '../transfer.ts'
 import { SAMPLE_CODE } from '../mockTransfer.ts'
@@ -9,6 +9,11 @@ interface ReceivePanelProps {
   update?: TransferUpdate
   busy: boolean
   isMock: boolean
+  outputDir: string
+  onOutputDirChange: (path: string) => void
+  sessionDirectory: string
+  decisionPending: boolean
+  decisionError: string
   onStartReceive: (code: string, outputDir: string) => Promise<void>
   onSelectReceiveDirectory?: () => Promise<string[]>
   onDecideReceive?: (accept: boolean) => Promise<void>
@@ -20,6 +25,11 @@ export function ReceivePanel({
   update,
   busy,
   isMock,
+  outputDir,
+  onOutputDirChange,
+  sessionDirectory,
+  decisionPending,
+  decisionError,
   onStartReceive,
   onSelectReceiveDirectory,
   onDecideReceive,
@@ -28,14 +38,9 @@ export function ReceivePanel({
 }: ReceivePanelProps) {
   const codeInputRef = useRef<HTMLInputElement>(null)
   const [code, setCode] = useState('')
-  const [outputDir, setOutputDir] = useState('Downloads')
   const [errorMsg, setErrorMsg] = useState('')
   const [feedback, setFeedback] = useState('')
   const [folderCopied, setFolderCopied] = useState(false)
-
-  useEffect(() => {
-    setOutputDir((dir) => (isMock ? 'Downloads' : dir === 'Downloads' ? '' : dir))
-  }, [isMock])
 
   const state = update?.state ?? 'IDLE'
   const activeRunning = isRunning(state)
@@ -66,7 +71,7 @@ export function ReceivePanel({
     try {
       const paths = await onSelectReceiveDirectory()
       if (paths.length > 0) {
-        setOutputDir(paths[0])
+        onOutputDirChange(paths[0])
         setErrorMsg('')
       }
     } catch (err) {
@@ -76,6 +81,7 @@ export function ReceivePanel({
 
   const handleStart = async (e?: React.FormEvent) => {
     if (e) e.preventDefault()
+    if (busy) return
     const trimmedCode = code.trim()
     const trimmedDir = outputDir.trim()
 
@@ -101,11 +107,11 @@ export function ReceivePanel({
 
   const handleCopyFolderPath = async () => {
     try {
-      await navigator.clipboard.writeText(outputDir)
+      await navigator.clipboard.writeText(sessionDirectory)
       setFolderCopied(true)
       setTimeout(() => setFolderCopied(false), 2000)
     } catch {
-      // Fallback
+      setErrorMsg('Không thể sao chép đường dẫn. Hãy sao chép thủ công.')
     }
   }
 
@@ -190,7 +196,7 @@ export function ReceivePanel({
                 type="text"
                 placeholder={onSelectReceiveDirectory ? 'Chọn thư mục lưu trên máy tính' : 'Thư mục nhận (VD: Downloads)'}
                 value={outputDir}
-                onChange={(e) => setOutputDir(e.target.value)}
+                onChange={(e) => onOutputDirChange(e.target.value)}
                 disabled={busy}
               />
               {onSelectReceiveDirectory && (
@@ -249,10 +255,10 @@ export function ReceivePanel({
             onReset={handleResetAll}
           />
 
-          {state === 'COMPLETED' && !isMock && (
+          {state === 'COMPLETED' && !isMock && sessionDirectory && (
             <div style={{ marginTop: '16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
               <span style={{ fontSize: '13px', color: 'var(--muted)' }}>
-                Đã lưu tại: <code style={{ color: 'var(--leaf)' }}>{outputDir}</code>
+                Đã lưu tại: <code style={{ color: 'var(--leaf)' }}>{sessionDirectory}</code>
               </span>
               <button
                 type="button"
@@ -277,7 +283,8 @@ export function ReceivePanel({
               onCancel()
             }
           }}
-          disabled={busy && state !== 'AWAITING_ACCEPTANCE'}
+          disabled={decisionPending}
+          error={decisionError}
         />
       )}
     </section>

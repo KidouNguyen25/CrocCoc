@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { getDesktopClient } from './wailsTransfer.ts'
+import { getDesktopClient, resolveRuntimeMode } from './wailsTransfer.ts'
 
 test('browser preview has no desktop client', () => {
   assert.equal(getDesktopClient({}), undefined)
@@ -121,4 +121,21 @@ test('desktop adapter GetCrocInfo preserves relayLabel and strips unexpected fie
     relayLabel: 'Relay công cộng: croc.schollz.com:9009',
   })
   assert.equal('relayPassword' in info, false)
+})
+
+test('release never falls back to mock even when native IPC is missing', () => {
+  for (const nativeHostPresent of [false, true]) {
+    for (const mockRequested of [false, true]) {
+      assert.equal(resolveRuntimeMode(false, nativeHostPresent, false, mockRequested), 'unavailable')
+      assert.equal(resolveRuntimeMode(true, nativeHostPresent, false, mockRequested), 'desktop')
+    }
+  }
+})
+
+test('development permits explicit desktop mock and browser preview, not partial Wails IPC', () => {
+  assert.equal(resolveRuntimeMode(false, false, true, false), 'mock')
+  assert.equal(resolveRuntimeMode(false, true, true, false), 'unavailable')
+  assert.equal(resolveRuntimeMode(false, true, true, true), 'unavailable')
+  assert.equal(resolveRuntimeMode(true, true, true, false), 'desktop')
+  assert.equal(resolveRuntimeMode(true, true, true, true), 'mock')
 })

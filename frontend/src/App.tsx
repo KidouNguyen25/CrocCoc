@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef, useMemo } from 'react'
-import { getDesktopClient } from './adapters/wailsTransfer.ts'
+import { getDesktopClient, resolveRuntimeMode } from './adapters/wailsTransfer.ts'
 import { createMockTransferClient } from './mockTransfer.ts'
 import {
   canToggleMockMode,
@@ -23,6 +23,7 @@ type SnapshotProbeResult = { lost: boolean; backendMissing: boolean }
 export interface SessionHistoryItem {
   id: string
   direction: 'send' | 'receive'
+  mock: boolean
   label: string
   code: string
   timestamp: string
@@ -35,6 +36,12 @@ export function App() {
   const [hasDesktopRuntime, setHasDesktopRuntime] = useState(false)
   const [isDesktop, setIsDesktop] = useState(false)
   const [useMock, setUseMock] = useState(false)
+  const [runtimeReady, setRuntimeReady] = useState(false)
+  const [receiveDirectory, setReceiveDirectory] = useState('')
+  const [sessionDirectory, setSessionDirectory] = useState('')
+  const [decisionPending, setDecisionPending] = useState(false)
+  const [decisionError, setDecisionError] = useState('')
+  const decisionInFlight = useRef(false)
   const [crocInfo, setCrocInfo] = useState<CrocInfo>()
   const [hostTitle, setHostTitle] = useState('Đang khởi tạo...')
   const [update, setUpdate] = useState<TransferUpdate>()
@@ -68,7 +75,7 @@ export function App() {
     const sampleCode = mock ? code : ''
     const timeStr = new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })
     setSessions((prev) => {
-      const existingIdx = prev.findIndex((s) => s.id === transferID)
+      const existingIdx = prev.findIndex((s) => s.id === transferID && s.mock === mock)
       const statusText = STATE_LABELS[state as keyof typeof STATE_LABELS] || state
       if (existingIdx >= 0) {
         const copy = [...prev]
@@ -84,6 +91,7 @@ export function App() {
         {
           id: transferID,
           direction,
+          mock,
           label,
           code: sampleCode,
           timestamp: timeStr,
@@ -116,15 +124,29 @@ export function App() {
 
   // Identify runtime environment and active client
   useEffect(() => {
+    let disposed = false
     const desktop = getDesktopClient()
+    setRuntimeReady(false)
+    setCrocInfo(undefined)
     setHasDesktopRuntime(Boolean(desktop))
-    if (desktop && !useMock) {
+    const host = window as Window & { go?: unknown; runtime?: unknown }
+    const mode = resolveRuntimeMode(Boolean(desktop), Boolean(host.go || host.runtime), import.meta.env.DEV, useMock)
+    if (mode === 'unavailable') {
+      setIsDesktop(true)
+      setCrocInfo({ available: false, message: 'ENGINE_UNAVAILABLE: Thiếu kết nối Wails IPC.' })
+      setHostTitle('Ứng dụng desktop · Lỗi kết nối Wails')
+      setAppError('Không thể kết nối ứng dụng desktop. Hãy mở lại CrocCoc.')
+      return
+    }
+    if (desktop && mode === 'desktop') {
       setIsDesktop(true)
       clientRef.current = desktop
       setHostTitle('Ứng dụng desktop (Wails IPC)')
       desktop.getCrocInfo().then(
         (info) => {
+          if (disposed) return
           setCrocInfo(info)
+          setRuntimeReady(info.available)
           if (!info.available) {
             setHostTitle(info.message ? `Ứng dụng desktop · ${info.message}` : 'Ứng dụng desktop · Chưa phát hiện Croc')
           } else if (info.relayLabel) {
@@ -132,6 +154,7 @@ export function App() {
           }
         },
         () => {
+          if (disposed) return
           setCrocInfo({ available: false, message: 'Không thể kết nối Croc engine.' })
           setHostTitle('Ứng dụng desktop · Lỗi kiểm tra Croc')
         },
@@ -140,11 +163,18 @@ export function App() {
       setIsDesktop(false)
       clientRef.current = mockClient
       setHostTitle(useMock ? 'Chế độ mô phỏng thủ công' : 'Bản xem trước trình duyệt (Mock)')
-      mockClient.getCrocInfo().then((info) => setCrocInfo(info))
+      mockClient.getCrocInfo().then((info) => {
+        if (disposed) return
+        setCrocInfo(info)
+        setRuntimeReady(true)
+      }, () => {
+        if (!disposed) setAppError('Không thể khởi tạo bản xem trước.')
+      })
     }
 
     // Subscribe to transfer events
     const unsubscribe = clientRef.current.subscribe((event) => {
+      if (disposed) return
       const trackingWasLost = trackerRef.current.snapshotFailures() >= MAX_SNAPSHOT_RETRIES
       const accepted = trackerRef.current.onEvent(event)
       if (accepted && trackingWasLost) {
@@ -154,14 +184,16 @@ export function App() {
     })
 
     return () => {
+      disposed = true
       unsubscribe()
     }
   }, [useMock, mockClient])
 
   const state = update?.state ?? 'IDLE'
-  const busy = !canToggleMockMode(pending, state)
+  const transferBusy = !canToggleMockMode(pending, state)
+  const busy = !runtimeReady || transferBusy
   const activeRoute = sessionRef.current?.direction === 'receive' ? 'nhan' : 'gui'
-  const blockedRoute = busy ? (activeRoute === 'gui' ? 'nhan' : 'gui') : undefined
+  const blockedRoute = transferBusy ? (activeRoute === 'gui' ? 'nhan' : 'gui') : undefined
   const activeTransferID = update?.transferID
   const activeRunning = Boolean(activeTransferID && isRunning(state))
   const displayedError = trackingError || appError
@@ -298,6 +330,8 @@ export function App() {
     direction: 'send' | 'receive',
     label: string,
   ) => {
+    if (!runtimeReady || transferBusy) throw new Error('Chưa sẵn sàng bắt đầu phiên truyền.')
+    setDecisionError('')
     sessionRef.current = { direction, label, mock: !isDesktop }
     trackerRef.current.beginStart()
     snapshotInFlightRef.current = null
@@ -332,13 +366,16 @@ export function App() {
       `Gửi ${paths.length} mục`,
     )
 
-  const handleStartReceive = (code: string, outputDir: string) =>
-    beginTransfer(
+  const handleStartReceive = async (code: string, outputDir: string) => {
+    if (!runtimeReady || transferBusy) throw new Error('Chưa sẵn sàng bắt đầu phiên nhận.')
+    setSessionDirectory(outputDir)
+    await beginTransfer(
       () => clientRef.current.startReceive(code, outputDir),
       'Lỗi khi bắt đầu phiên nhận.',
       'receive',
       'Nhận tệp',
     )
+  }
 
   const handleSelectPaths = (kind: 'sendFiles' | 'sendDirectory' | 'receiveDirectory') => {
     const selectPaths = clientRef.current.selectPaths
@@ -355,24 +392,43 @@ export function App() {
 
   const handleCancel = async () => {
     if (!update?.transferID) return
+    const id = update.transferID
+    let issue = ''
     try {
-      await clientRef.current.cancelTransfer(update.transferID)
+      const accepted = await clientRef.current.cancelTransfer(id)
+      if (!accepted) issue = 'Backend không chấp nhận yêu cầu hủy phiên.'
     } catch (err) {
-      setAppError(err instanceof Error ? err.message : 'Không thể hủy phiên.')
+      issue = err instanceof Error ? err.message : 'Không thể hủy phiên.'
     }
+    if (trackerRef.current.current()?.transferID !== id) return
+    await probeSnapshot(id, true)
+    const current = trackerRef.current.current()
+    if (issue && current?.transferID === id && isRunning(current.state)) setAppError(issue)
   }
 
   const handleDecideReceive = async (accept: boolean) => {
-    if (!update?.transferID || !update.receiveOffer) return
+    if (!update?.transferID || !update.receiveOffer || decisionInFlight.current) return
+    const id = update.transferID
     const offerID = update.receiveOffer.offerID
-    if (clientRef.current.decideReceive) {
-      try {
-        await clientRef.current.decideReceive(update.transferID, offerID, accept)
-      } catch (err) {
-        setAppError(err instanceof Error ? err.message : 'Không thể gửi quyết định xác nhận.')
+    decisionInFlight.current = true
+    setDecisionPending(true)
+    setDecisionError('')
+    try {
+      if (!clientRef.current.decideReceive) throw new Error('Không có kết nối xác nhận phiên nhận.')
+      const accepted = await clientRef.current.decideReceive(id, offerID, accept)
+      if (!accepted) throw new Error('Backend không chấp nhận quyết định. Hãy kiểm tra trạng thái phiên.')
+    } catch (err) {
+      const current = trackerRef.current.current()
+      if (current?.transferID === id && current.state === 'AWAITING_ACCEPTANCE' && current.receiveOffer?.offerID === offerID) {
+        setDecisionError(err instanceof Error ? err.message : 'Không thể gửi quyết định xác nhận.')
       }
-    } else if (!accept) {
-      await handleCancel()
+    } finally {
+      try {
+        if (trackerRef.current.current()?.transferID === id) await probeSnapshot(id, true)
+      } finally {
+        decisionInFlight.current = false
+        setDecisionPending(false)
+      }
     }
   }
 
@@ -421,6 +477,8 @@ export function App() {
     setForceResetAvailable(false)
     setUpdate(undefined)
     setConnectionCode('')
+    setSessionDirectory('')
+    setDecisionError('')
     setAppError(
       force && !backendMissing
         ? 'Chỉ đặt lại giao diện, chưa xác nhận backend đã dừng. Phiên mới có thể bị từ chối BUSY; hãy kiểm tra lại engine trước khi thử.'
@@ -558,6 +616,11 @@ export function App() {
               update={activeRoute === 'nhan' ? update : undefined}
               busy={busy}
               isMock={!isDesktop}
+              outputDir={isDesktop ? receiveDirectory : 'Downloads'}
+              onOutputDirChange={setReceiveDirectory}
+              sessionDirectory={sessionDirectory}
+              decisionPending={decisionPending}
+              decisionError={decisionError}
               onStartReceive={handleStartReceive}
               onSelectReceiveDirectory={isDesktop && !useMock ? () => handleSelectPaths('receiveDirectory') : undefined}
               onDecideReceive={handleDecideReceive}
@@ -573,12 +636,12 @@ export function App() {
                 <h1 id="history-title" tabIndex={-1}>
                   Phiên truyền
                 </h1>
-                <p>Xem các phiên {isDesktop ? 'truyền' : 'mẫu'} được tạo trong lần mở này.</p>
+                <p>Xem các phiên được tạo trong lần mở này.</p>
               </header>
 
               <section className="panel narrow" aria-labelledby="history-list-title">
                 <div className="panel-head">
-                  <h2 id="history-list-title">{isDesktop ? 'Lịch sử phiên truyền' : 'Lịch sử xem trước'}</h2>
+                  <h2 id="history-list-title">Lịch sử phiên</h2>
                   <span className="state" id="history-count">
                     {sessions.length} phiên
                   </span>
@@ -595,14 +658,14 @@ export function App() {
                 ) : (
                   <ul className="file-list history-list" id="history-list">
                     {sessions.map((item) => (
-                      <li key={item.id}>
+                      <li key={`${item.mock ? 'mock' : 'desktop'}:${item.id}`}>
                         <div className="file-label">
                           <svg className="icon" aria-hidden="true">
                             <use href={item.direction === 'send' ? '#i-send' : '#i-receive'} />
                           </svg>
                           <div>
                             <strong>{item.label}</strong>
-                            <div className="session-meta">{item.timestamp}</div>
+                            <div className="session-meta">{item.timestamp} · {item.mock ? 'Mô phỏng' : 'Truyền thật'}</div>
                           </div>
                         </div>
                         <div className="file-meta">
@@ -674,7 +737,7 @@ export function App() {
                   )}
                 </dl>
 
-                {hasDesktopRuntime && (
+                {import.meta.env.DEV && hasDesktopRuntime && (
                   <div
                     style={{
                       marginTop: '20px',
@@ -695,12 +758,13 @@ export function App() {
                       className="button secondary"
                       aria-pressed={useMock}
                       onClick={() => {
-                        if (busy) return
+                        if (transferBusy) return
+                        setRuntimeReady(false)
                         setUseMock(!useMock)
                         handleReset()
                       }}
-                      disabled={busy}
-                      title={busy ? 'Không thể đổi engine trong khi truyền tệp' : undefined}
+                      disabled={transferBusy}
+                      title={transferBusy ? 'Không thể đổi engine trong khi truyền tệp' : undefined}
                     >
                       {useMock ? 'Chuyển sang Engine thật (Wails)' : 'Chuyển sang Chế độ mô phỏng'}
                     </button>
