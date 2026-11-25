@@ -237,7 +237,7 @@ export function ReceivePanel({
               </svg>
             </button>
           ) : (
-            <button type="button" className="button danger" onClick={onCancel}>
+            <button type="button" className="button danger" onClick={onCancel} disabled={state === 'FINALIZING' || state === 'CANCELLING'}>
               Hủy phiên
             </button>
           )}

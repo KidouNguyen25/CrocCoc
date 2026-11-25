@@ -47,7 +47,7 @@ export function TransferProgress({
     cleanupPending,
   } = update
 
-  const computedProgress = computeProgressPercent(bytesTransferred, bytesTotal) ?? progress
+  const computedProgress = computeProgressPercent(bytesTransferred, bytesTotal) ?? (!isDesktop && typeof progress === 'number' && Number.isFinite(progress) && progress >= 0 && progress <= 100 ? progress : undefined)
   const active = isRunning(state)
   const codeToShow = update.connectionCode || connectionCode
   const eta = calculateETA(bytesTransferred, bytesTotal, bytesPerSecond)
@@ -95,7 +95,8 @@ export function TransferProgress({
             type="button"
             className="button danger"
             onClick={onCancel}
-            title="Hủy phiên truyền tệp này"
+            disabled={state === 'FINALIZING' || state === 'CANCELLING'}
+            title={state === 'FINALIZING' ? 'Đã qua mốc hủy phiên' : 'Hủy phiên truyền tệp này'}
           >
             Hủy phiên
           </button>
@@ -118,7 +119,7 @@ export function TransferProgress({
 
       {/* Progress Bar during active transfer */}
       {(state === 'TRANSFERRING' || state === 'FINALIZING') && (
-        <div className="progress-track" role="progressbar" aria-valuenow={computedProgress ? Math.round(computedProgress) : undefined} aria-valuemin={0} aria-valuemax={100}>
+        <div className="progress-track" role="progressbar" aria-valuenow={computedProgress !== undefined ? Math.round(computedProgress) : undefined} aria-valuemin={0} aria-valuemax={100}>
           {computedProgress !== undefined ? (
             <div
               className="progress-bar-fill"

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { formatBytes, formatSpeed, formatDuration, calculateETA, STATE_LABELS } from './formatters.ts'
+import { computeProgressPercent, formatBytes, formatSpeed, formatDuration, calculateETA, STATE_LABELS } from './formatters.ts'
 
 test('formatBytes formats various sizes correctly', () => {
   assert.equal(formatBytes(undefined), 'Chưa rõ dung lượng')
@@ -43,4 +43,16 @@ test('STATE_LABELS covers all TransferState states', () => {
   for (const s of states) {
     assert(typeof STATE_LABELS[s] === 'string' && STATE_LABELS[s].length > 0)
   }
+})
+
+test('wire progress is exact and fails closed for invalid or overflowing values', () => {
+  assert.equal(computeProgressPercent('0', '123'), 0)
+  assert.equal(computeProgressPercent('9007199254740993', '18014398509481986'), 50)
+  assert.equal(computeProgressPercent('9223372036854775807', '9223372036854775807'), 100)
+  for (const value of [null, undefined, '', '-1', '1.1', '1e3', NaN, Infinity, -1, 0.5, 9007199254740992, '9223372036854775808', '9'.repeat(1000)]) {
+    assert.equal(computeProgressPercent(value, '9223372036854775807'), undefined)
+    assert.equal(computeProgressPercent('0', value), undefined)
+  }
+  assert.equal(computeProgressPercent('1', '0'), undefined)
+  assert.equal(computeProgressPercent('2', '1'), undefined)
 })

@@ -1,6 +1,18 @@
 import type { TransferState } from '../transfer.ts'
 
 const DECIMAL_UINT_RE = /^\d+$/
+const MAX_WIRE_BYTES = 9223372036854775807n
+
+function parseWireBytes(value: unknown): bigint | undefined {
+  if (typeof value === 'number') {
+    if (!Number.isSafeInteger(value) || value < 0) return undefined
+    return BigInt(value)
+  }
+  // Bound the length before BigInt to reject hostile or malformed wire values.
+  if (typeof value !== 'string' || value.length > 19 || !DECIMAL_UINT_RE.test(value)) return undefined
+  const parsed = BigInt(value)
+  return parsed <= MAX_WIRE_BYTES ? parsed : undefined
+}
 
 /**
  * Compute exact transfer percentage from decimal byte strings or numbers using BigInt.
@@ -10,17 +22,9 @@ export function computeProgressPercent(
   bytesTransferred?: number | string,
   bytesTotal?: number | string,
 ): number | undefined {
-  if (bytesTransferred === undefined || bytesTotal === undefined) return undefined
-  const tStr = typeof bytesTransferred === 'number'
-    ? (Number.isInteger(bytesTransferred) && bytesTransferred >= 0 ? String(bytesTransferred) : '')
-    : bytesTransferred
-  const totalStr = typeof bytesTotal === 'number'
-    ? (Number.isInteger(bytesTotal) && bytesTotal >= 0 ? String(bytesTotal) : '')
-    : bytesTotal
-  if (!DECIMAL_UINT_RE.test(tStr) || !DECIMAL_UINT_RE.test(totalStr)) return undefined
-  const transferred = BigInt(tStr)
-  const total = BigInt(totalStr)
-  if (total <= 0n || transferred > total) return undefined
+  const transferred = parseWireBytes(bytesTransferred)
+  const total = parseWireBytes(bytesTotal)
+  if (transferred === undefined || total === undefined || total === 0n || transferred > total) return undefined
   const basisPoints = (transferred * 10000n) / total
   return Number(basisPoints) / 100
 }

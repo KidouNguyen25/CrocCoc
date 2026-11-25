@@ -17,6 +17,10 @@ import type { AppRoute } from './components/ModeSwitcher.tsx'
 import { SendPanel } from './components/SendPanel.tsx'
 import { ReceivePanel } from './components/ReceivePanel.tsx'
 import { STATE_LABELS } from './utils/formatters.ts'
+import packageInfo from '../package.json'
+
+const RELEASES_URL = 'https://github.com/KidouNguyen25/CrocCoc/releases'
+const PROJECT_URL = 'https://github.com/KidouNguyen25/CrocCoc'
 
 type SnapshotProbeResult = { lost: boolean; backendMissing: boolean }
 
@@ -42,6 +46,8 @@ export function App() {
   const [decisionPending, setDecisionPending] = useState(false)
   const [decisionError, setDecisionError] = useState('')
   const decisionInFlight = useRef(false)
+  const startInFlight = useRef(false)
+  const sessionEpoch = useRef(0)
   const [crocInfo, setCrocInfo] = useState<CrocInfo>()
   const [hostTitle, setHostTitle] = useState('Đang khởi tạo...')
   const [update, setUpdate] = useState<TransferUpdate>()
@@ -54,6 +60,7 @@ export function App() {
   const [pollRecoveryToken, setPollRecoveryToken] = useState(0)
   const [appError, setAppError] = useState('')
   const [sessions, setSessions] = useState<SessionHistoryItem[]>([])
+  const [diagnosticsMessage, setDiagnosticsMessage] = useState('')
 
   // Persistent mock client instance for browser preview
   const mockClient = useMemo(() => createMockTransferClient(), [])
@@ -239,6 +246,7 @@ export function App() {
       return inFlight.transferID === transferID ? inFlight.promise : Promise.resolve(noChange)
     }
     if (!clientRef.current.getTransferSnapshot) return Promise.resolve(noChange)
+    const epoch = sessionEpoch.current
     const wasLost = trackerRef.current.snapshotFailures() >= MAX_SNAPSHOT_RETRIES
     if (wasLost && !allowWhenLost) return Promise.resolve(noChange)
 
@@ -249,6 +257,7 @@ export function App() {
         transferID,
         MAX_SNAPSHOT_RETRIES,
       )
+      if (epoch !== sessionEpoch.current || trackerRef.current.current()?.transferID !== transferID) return noChange
       if (result.backendMissing) {
         setTrackingLost(true)
         setBackendMissing(true)
@@ -329,8 +338,12 @@ export function App() {
     fallbackError: string,
     direction: 'send' | 'receive',
     label: string,
+    destination = '',
   ) => {
-    if (!runtimeReady || transferBusy) throw new Error('Chưa sẵn sàng bắt đầu phiên truyền.')
+    if (!runtimeReady || transferBusy || startInFlight.current) throw new Error('Chưa sẵn sàng bắt đầu phiên truyền.')
+    startInFlight.current = true
+    sessionEpoch.current++
+    setSessionDirectory(destination)
     setDecisionError('')
     sessionRef.current = { direction, label, mock: !isDesktop }
     trackerRef.current.beginStart()
@@ -354,6 +367,7 @@ export function App() {
       setAppError(err instanceof Error ? err.message : fallbackError)
       throw err
     } finally {
+      startInFlight.current = false
       setPending(false)
     }
   }
@@ -367,13 +381,12 @@ export function App() {
     )
 
   const handleStartReceive = async (code: string, outputDir: string) => {
-    if (!runtimeReady || transferBusy) throw new Error('Chưa sẵn sàng bắt đầu phiên nhận.')
-    setSessionDirectory(outputDir)
     await beginTransfer(
       () => clientRef.current.startReceive(code, outputDir),
       'Lỗi khi bắt đầu phiên nhận.',
       'receive',
       'Nhận tệp',
+      outputDir,
     )
   }
 
@@ -391,7 +404,7 @@ export function App() {
   }
 
   const handleCancel = async () => {
-    if (!update?.transferID) return
+    if (!update?.transferID || update.state === 'FINALIZING' || update.state === 'CANCELLING') return
     const id = update.transferID
     let issue = ''
     try {
@@ -464,11 +477,46 @@ export function App() {
     }
   }
 
+  const openProjectPage = (url: typeof RELEASES_URL | typeof PROJECT_URL) => {
+    // Never navigate the privileged desktop WebView to an external page.
+    const host = window as Window & { go?: unknown; runtime?: { BrowserOpenURL?: (url: string) => void } }
+    if (isDesktop || hasDesktopRuntime || host.go || host.runtime) {
+      if (typeof host.runtime?.BrowserOpenURL !== 'function') {
+        setDiagnosticsMessage('Không thể mở trình duyệt. Hãy truy cập GitHub thủ công.')
+        return
+      }
+      host.runtime.BrowserOpenURL(url)
+    } else {
+      window.open(url, '_blank', 'noopener,noreferrer')
+    }
+  }
+
+  const copyDiagnostics = async () => {
+    // An explicit allowlist; never include raw engine messages, relay labels,
+    // file paths, connection codes, transfer IDs, or environment variables.
+    const engineVersion = crocInfo?.version
+    const safeVersion = engineVersion && /^v?\d+\.\d+\.\d+$/.test(engineVersion) ? engineVersion : 'unknown'
+    const diagnostics = [
+      'CrocCoc ' + packageInfo.version,
+      'Runtime: ' + (isDesktop ? 'desktop' : 'development mock'),
+      'Engine available: ' + Boolean(isDesktop && crocInfo?.available),
+      'Engine version: ' + safeVersion,
+      'Transfer state: ' + state,
+    ].join('\n')
+    try {
+      await navigator.clipboard.writeText(diagnostics)
+      setDiagnosticsMessage('Đã sao chép thông tin chẩn đoán, không chứa mã hoặc đường dẫn tệp.')
+    } catch {
+      setDiagnosticsMessage('Không thể sao chép thông tin chẩn đoán.')
+    }
+  }
+
   const handleReset = (force = false) => {
     if (activeRunning && !(force && trackingLost && forceResetAvailable)) {
       setAppError('Phiên truyền vẫn có thể đang chạy. Hãy hủy phiên và chờ xác nhận trước khi đặt lại.')
       return
     }
+    sessionEpoch.current++
     trackerRef.current.reset()
     snapshotInFlightRef.current = null
     setTrackingLost(false)
@@ -737,6 +785,17 @@ export function App() {
                   )}
                 </dl>
 
+                <dl className="spec-list">
+                  <div><dt>CrocCoc</dt><dd>{packageInfo.version}</dd></div>
+                  <div><dt>Giấy phép</dt><dd>Apache-2.0</dd></div>
+                </dl>
+                <div className="alert-actions" style={{ marginTop: '16px', flexWrap: 'wrap' }}>
+                  <button type="button" className="button secondary" onClick={() => openProjectPage(RELEASES_URL)}>Kiểm tra bản mới</button>
+                  <button type="button" className="button secondary" onClick={() => openProjectPage(PROJECT_URL)}>GitHub</button>
+                  <button type="button" className="button secondary" onClick={() => void copyDiagnostics()}>Sao chép chẩn đoán</button>
+                </div>
+                <p className="panel-note" role="status">{diagnosticsMessage}</p>
+
                 {import.meta.env.DEV && hasDesktopRuntime && (
                   <div
                     style={{
@@ -781,7 +840,7 @@ export function App() {
             </svg>
             <span>
               {isDesktop && !useMock
-                ? 'CrocCoc Desktop v0.1.0 • Chuẩn truyền Croc PAKE'
+                ? `CrocCoc Desktop v${packageInfo.version} • Chuẩn truyền Croc PAKE`
                 : 'Bản mô phỏng không truyền dữ liệu.'}
             </span>
           </footer>
