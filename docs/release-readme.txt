@@ -60,8 +60,8 @@ và luôn xác minh mã băm SHA-256 trước khi chạy.
         từ chối khởi tạo engine (ENGINE_UNAVAILABLE) kèm thông báo lỗi rõ ràng,
         tuyệt đối không lẳng lặng rơi về relay công cộng khi bạn cấu hình dở.
   + Khi khởi động, CrocCoc.exe đọc CROCCOC_RELAY_PASSWORD vào bộ nhớ rồi xóa ngay
-    biến này khỏi môi trường tiến trình chính, và chỉ truyền cho tiến trình con
-    bin\croccoc-engine.exe trong danh sách biến môi trường tối thiểu.
+    biến này khỏi môi trường tiến trình chính, và truyền cho tiến trình con
+    bin\croccoc-engine.exe qua pipe stdin riêng, không đưa vào argv hay env.
 
 4. Kiểm tra toàn vẹn gói & Lưu ý bản Pre-release MVP
 ----------------------------------------------------

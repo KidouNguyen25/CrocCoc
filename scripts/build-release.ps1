@@ -42,6 +42,8 @@ $nodeVersion = (& node --version)
 $wailsConfig = Get-Content -Raw (Join-Path $repoRoot "wails.json") | ConvertFrom-Json
 $appVersion = $wailsConfig.info.productVersion
 $releaseVersion = if ($PackageVersion.Trim()) { $PackageVersion.Trim() } else { $appVersion }
+if ($releaseVersion -notmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?$') { throw "Invalid release version." }
+if (($releaseVersion -split '-', 2)[0] -ne $appVersion) { throw "Release version differs from wails.json." }
 
 # 2. Frontend.
 Invoke-Native npm @("--prefix", "frontend", "ci")
@@ -66,7 +68,10 @@ if (-not $SkipTests) {
     Invoke-Native npm @("--prefix", "frontend", "audit", "--audit-level=high")
 }
 
-# 5. Build Wails.
+# 5. Build Wails with the repository's branded icon.
+$iconDir = Join-Path $repoRoot "build"
+New-Item -ItemType Directory -Path $iconDir -Force | Out-Null
+Copy-Item -LiteralPath (Join-Path $repoRoot "branding/croccoc-mark.png") -Destination (Join-Path $iconDir "appicon.png") -Force
 Invoke-Native wails @("build", "-platform", "windows/amd64", "-clean")
 $exe = Join-Path $repoRoot "build\bin\CrocCoc.exe"
 if (-not (Test-Path -LiteralPath $exe)) { throw "Không thấy build\bin\CrocCoc.exe sau khi build." }

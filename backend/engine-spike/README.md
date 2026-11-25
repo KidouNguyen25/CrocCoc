@@ -10,7 +10,7 @@ Chạy PowerShell trên Windows:
 .\backend\engine-spike\worker\build.ps1
 ```
 
-Script clone đúng commit Croc, kiểm rồi áp patch, khóa Go 1.27.3 và build Windows amd64 không Tailcat. Script chạy loopback test gồm nhận tệp và thư mục rỗng, rồi so SHA-256 với `backend/transfer/worker_hash_windows.go`. Build dừng nếu hash không khớp. Worker xuất hiện tại `backend/engine-spike/worker/croccoc-engine-spike.exe`; file build không thuộc Git.
+Script clone đúng commit Croc, kiểm rồi áp patch, khóa Go 1.27.4 và build Windows amd64 không Tailcat. Script chạy loopback test gồm nhận tệp và thư mục rỗng, rồi so SHA-256 với `backend/transfer/worker_hash_windows.go`. Build dừng nếu hash không khớp. Worker xuất hiện tại `backend/engine-spike/worker/croccoc-engine-spike.exe`; file build không thuộc Git.
 
 Host nhận đường dẫn tuyệt đối qua `CROCCOC_WORKER_PATH`. Backend chỉ báo Croc khả dụng khi worker khớp SHA-256 đã ghim. Backend giữ khóa file và tổ tiên để chặn sửa hoặc thay worker trong lúc app chạy. Relay dùng `CROCCOC_RELAY_ADDRESS` và `CROCCOC_RELAY_PASSWORD`.
 
