@@ -208,3 +208,31 @@ func TestBeforeClosePromptsDuringTransferringAndFinalizing(t *testing.T) {
 		t.Fatalf("expected finalizing dialog to explain non-cancellable publish stage, got %q: %q", finalizingTitle, finalizingMsg)
 	}
 }
+
+// Active native state must win even if a delayed event arrived from an old
+// session after the newer transfer acquired the coordinator.
+type activeCloseController struct {
+	fakeControllerService
+	active transfer.SessionSnapshot
+}
+
+func (f *activeCloseController) ActiveTransferSnapshot() (transfer.SessionSnapshot, bool) {
+	return f.active, f.active.TransferID != ""
+}
+
+func TestBeforeCloseUsesActiveNativeSessionNotDelayedEvent(t *testing.T) {
+	controller := &activeCloseController{
+		active: transfer.SessionSnapshot{TransferID: "new-session", State: transfer.Finalizing},
+	}
+	app := newApp(controller)
+	app.setLastTransferID("old-session")
+	app.emitTransferUpdate(transfer.Update{TransferID: "old-session", State: transfer.Completed})
+	var prompted transfer.State
+	app.confirmClose = func(_ context.Context, state transfer.State) bool {
+		prompted = state
+		return false
+	}
+	if !app.beforeClose(context.Background()) || prompted != transfer.Finalizing || controller.shutdownRan {
+		t.Fatalf("close ignored active finalizing session: prompted=%q shutdown=%t", prompted, controller.shutdownRan)
+	}
+}

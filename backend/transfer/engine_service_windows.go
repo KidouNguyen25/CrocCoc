@@ -412,7 +412,7 @@ func (s *engineService) runReceive(ctx context.Context, session *engineSession, 
 		final, result, finalErr := FinalizeNativeReceive(&s.coordinator, session.id, pending.lease, stage, pending.entries,
 			func(finalizing SessionSnapshot) { s.emit(finalizing, "", "") })
 		if finalErr != nil {
-			s.finishReceiveSession(session.id, finalErr, result.Partial, !recoverClosedStage(stage, pending))
+			s.finishReceiveSession(session.id, finalErr, result.Partial || len(result.Published) > 0, !recoverClosedStage(stage, pending))
 		} else {
 			s.emit(final, "", "")
 			_ = result
@@ -498,6 +498,17 @@ func (s *engineService) DecideReceive(id, offerID string, accept bool) (bool, er
 
 func (s *engineService) GetReceiveOffer(id string) (ReceiveOffer, bool) {
 	return s.coordinator.GetReceiveOffer(id)
+}
+
+// ActiveTransferSnapshot is internal to the native host; it carries no code.
+func (s *engineService) ActiveTransferSnapshot() (SessionSnapshot, bool) {
+	c := &s.coordinator
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.active == nil {
+		return SessionSnapshot{}, false
+	}
+	return cloneSessionSnapshot(*c.active), true
 }
 
 func (s *engineService) GetTransferSnapshot(id string) (SessionSnapshot, bool) {

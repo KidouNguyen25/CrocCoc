@@ -148,13 +148,24 @@ func (a *App) getLastTransferID() string {
 // beforeClose prompts for confirmation when a session is actively transferring
 // or finalizing payload data. Returning true prevents window closure.
 func (a *App) beforeClose(ctx context.Context) bool {
-	if lastID := a.getLastTransferID(); lastID != "" {
-		if snap := a.GetTransferSnapshot(lastID); snap != nil &&
-			(snap.State == transfer.Transferring || snap.State == transfer.Finalizing) {
-			if !a.confirmActiveClose(ctx, snap.State) {
-				return true
-			}
+	// Native service reads the coordinator's current admission directly.
+	// A delayed terminal event from an older receive must not hide a new
+	// transferring/finalizing session when the user closes the window.
+	var state transfer.State
+	if active, ok := a.transfers.(interface {
+		ActiveTransferSnapshot() (transfer.SessionSnapshot, bool)
+	}); ok {
+		if snapshot, found := active.ActiveTransferSnapshot(); found {
+			state = snapshot.State
 		}
+	} else if lastID := a.getLastTransferID(); lastID != "" {
+		if snap := a.GetTransferSnapshot(lastID); snap != nil {
+			state = snap.State
+		}
+	}
+	if (state == transfer.Transferring || state == transfer.Finalizing) &&
+		!a.confirmActiveClose(ctx, state) {
+		return true
 	}
 	a.shutdown()
 	return false
@@ -205,9 +216,6 @@ func (a *App) shutdown() {
 }
 
 func (a *App) emitTransferUpdate(update transfer.Update) {
-	if update.TransferID != "" {
-		a.setLastTransferID(update.TransferID)
-	}
 	a.mu.RLock()
 	ctx := a.ctx
 	a.mu.RUnlock()

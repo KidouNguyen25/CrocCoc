@@ -719,3 +719,31 @@ func TestFinalizeNativeReceiveEmitsFinalizingAndCompletedByteMetrics(t *testing.
 		t.Fatalf("completed snapshot lost byte metrics: %+v, %t", update, ok)
 	}
 }
+
+func TestActiveTransferSnapshotNeverReturnsReleasedSession(t *testing.T) {
+	var service engineService
+	c := &service.coordinator
+	if _, ok := service.ActiveTransferSnapshot(); ok {
+		t.Fatal("empty coordinator reported active")
+	}
+	first, err := c.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active, ok := service.ActiveTransferSnapshot(); !ok || active.TransferID != first.TransferID {
+		t.Fatalf("active snapshot missing: %+v", active)
+	}
+	if _, ok := c.Fail(first.TransferID, ErrTransferFailed); !ok || !c.Release(first.TransferID) {
+		t.Fatal("failed session did not release")
+	}
+	if _, ok := service.ActiveTransferSnapshot(); ok {
+		t.Fatal("released session still reported active")
+	}
+	second, err := c.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active, ok := service.ActiveTransferSnapshot(); !ok || active.TransferID != second.TransferID {
+		t.Fatalf("active snapshot did not follow new admission: %+v", active)
+	}
+}
