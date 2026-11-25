@@ -3,6 +3,8 @@
 AppId={{8F94D7C2-6B3E-4D1A-9C52-7E3A1B4F8C90}
 AppName=CrocCoc
 AppVersion={#ReleaseVersion}
+VersionInfoVersion={#NumericVersion}
+VersionInfoProductVersion={#NumericVersion}
 AppPublisher=CrocCoc
 DefaultDirName={localappdata}\Programs\CrocCoc
 DefaultGroupName=CrocCoc
@@ -15,10 +17,14 @@ OutputBaseFilename=CrocCoc-{#ReleaseVersion}-win64-setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile={#SetupIconPath}
 UninstallDisplayIcon={app}\CrocCoc.exe
 CloseApplications=yes
 RestartApplications=no
 [Files]
+#ifdef WebView2InstallerPath
+Source: "{#WebView2InstallerPath}"; DestName: "CrocCoc-WebView2Setup.exe"; Flags: dontcopy noencryption
+#endif
 Source: "{#StageDir}\CrocCoc.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\bin\croccoc-engine.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
 Source: "{#StageDir}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
@@ -43,16 +49,35 @@ begin
     Result := (Version <> '') and (Version <> '0.0.0.0');
 end;
 
-function InitializeSetup(): Boolean;
-var
-  ErrorCode: Integer;
+function HasRuntime(): Boolean;
 begin
-  Result := HasRuntimeAt(HKLM32) or HasRuntimeAt(HKCU32);
-  if not Result then begin
-    Log('WebView2 Evergreen Runtime missing. Install it from Microsoft and retry.');
-    if not WizardSilent then begin
-      if MsgBox('Microsoft Edge WebView2 Evergreen Runtime is required. Install the official Evergreen Bootstrapper (online) or Standalone Installer (offline), then retry. Open Microsoft download page?', mbConfirmation, MB_YESNO) = IDYES then
-        ShellExec('open', 'https://developer.microsoft.com/en-us/microsoft-edge/webview2/', '', '', SW_SHOWNORMAL, ewNoWait, ErrorCode);
+  Result := HasRuntimeAt(HKLM32) or HasRuntimeAt(HKCU);
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  InstallerPath: String;
+  ExitCode: Integer;
+begin
+  Result := '';
+  if HasRuntime() then exit;
+#ifdef WebView2InstallerPath
+  try
+    ExtractTemporaryFile('CrocCoc-WebView2Setup.exe');
+    InstallerPath := ExpandConstant('{tmp}\CrocCoc-WebView2Setup.exe');
+    if CompareText(GetSHA256OfFile(InstallerPath), '{#WebView2InstallerHash}') <> 0 then begin
+      Result := 'WebView2 installer integrity check failed.';
+      exit;
     end;
+    if not Exec(InstallerPath, '/silent /install', ExpandConstant('{tmp}'), SW_HIDE, ewWaitUntilTerminated, ExitCode) then begin
+      Result := 'Could not start the Microsoft WebView2 installer.';
+      exit;
+    end;
+    Log('WebView2 installer exit code: ' + IntToStr(ExitCode));
+    if HasRuntime() then exit;
+  except
+    Log('WebView2 installer could not be extracted or verified.');
   end;
+#endif
+  Result := 'Microsoft Edge WebView2 Evergreen Runtime is required. Install the official Evergreen Standalone Installer from https://developer.microsoft.com/en-us/microsoft-edge/webview2/ (offline) or retry online, then run CrocCoc Setup again.';
 end;

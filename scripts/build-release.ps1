@@ -27,22 +27,29 @@ function Get-Sha256([string]$Path) { (Get-FileHash -LiteralPath $Path -Algorithm
 
 # 1. Điều kiện vào: nguồn sạch, đúng công cụ.
 $gitSha = (& git rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or $gitSha -notmatch "^[a-f0-9]{40}$") { throw "Cannot resolve Git HEAD." }
 $dirty = (& git status --porcelain)
+if ($LASTEXITCODE -ne 0) { throw "Cannot inspect Git status." }
 if ($dirty -and -not $AllowDirty) { throw "Cây làm việc chưa sạch. Commit hoặc dùng -AllowDirty (bản này sẽ không được nghiệm thu)." }
 
 $wailsVersionOutput = ((& wails version) -join "`n")
 $wailsVersionLine = [regex]::Match($wailsVersionOutput, '(?m)^v[0-9]+\.[0-9]+\.[0-9]+[^\r\n]*$').Value.Trim()
 $wailsPin = [regex]::Match((Get-Content -Raw (Join-Path $repoRoot "go.mod")), '(?m)^\s*(?:require\s+)?github\.com/wailsapp/wails/v2\s+(v[0-9]+\.[0-9]+\.[0-9]+)').Groups[1].Value
-if (-not $wailsPin -or $wailsVersionLine -notmatch [regex]::Escape($wailsPin)) {
+if (-not $wailsPin -or $wailsVersionLine -cne $wailsPin) {
     throw "Wails CLI cần khớp phiên bản trong go.mod ($wailsPin), đang có: $wailsVersionLine"
 }
 $goVersion = (& go version)
 $nodeVersion = (& node --version)
+if ($LASTEXITCODE -ne 0 -or $goVersion -notmatch "^go version go1\.27\.4 windows/amd64$" -or $nodeVersion -cne "v24.21.0") { throw "Release requires Go 1.27.4 Windows amd64 and Node 24.21.0." }
+$npmVersion = (& npm --version)
+if ($LASTEXITCODE -ne 0) { throw "Cannot resolve npm version." }
 
 $wailsConfig = Get-Content -Raw (Join-Path $repoRoot "wails.json") | ConvertFrom-Json
 $appVersion = $wailsConfig.info.productVersion
-$releaseVersion = if ($PackageVersion.Trim()) { $PackageVersion.Trim() } else { $appVersion }
-if ($releaseVersion -notmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?$') { throw "Invalid release version." }
+$frontendVersion = (Get-Content -Raw (Join-Path $repoRoot "frontend/package.json") | ConvertFrom-Json).version
+if ($frontendVersion -cne $appVersion) { throw "Frontend and Wails versions differ." }
+$releaseVersion = if ($PackageVersion.Trim()) { $PackageVersion.Trim() } else { "$appVersion-rc.1" }
+if ($releaseVersion -notmatch '^\d+\.\d+\.\d+-(rc|mvp|beta)\.[1-9]\d*$') { throw "Unsigned builds must use a prerelease version." }
 if (($releaseVersion -split '-', 2)[0] -ne $appVersion) { throw "Release version differs from wails.json." }
 
 # 2. Frontend.
@@ -100,6 +107,12 @@ if ($frontendSbomDocument.bomFormat -ne "CycloneDX") { throw "Npm SBOM không đ
 $frontendSbomJson | Set-Content -Encoding utf8 (Join-Path $stage "sbom-frontend.cdx.json")
 
 # 7. SHA-256 và manifest.
+$finalSha = (& git rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or $finalSha -cne $gitSha) { throw "Git HEAD changed during build." }
+$finalDirty = & git status --porcelain
+if ($LASTEXITCODE -ne 0) { throw "Cannot inspect final Git status." }
+if ($finalDirty -and -not $AllowDirty) { throw "Build changed the source tree." }
+$dirty = [bool]($dirty -or $finalDirty)
 $files = Get-ChildItem -LiteralPath $stage -Recurse -File | Sort-Object FullName
 $sums = foreach ($f in $files) {
     $rel = $f.FullName.Substring($stage.Length + 1).Replace("\", "/")
@@ -121,7 +134,7 @@ if (-not $crocVersion -or -not $upstreamCommit) { throw "Không đọc được 
     crocVersion    = $crocVersion
     crocUpstreamCommit = $upstreamCommit
     workerSha256   = $pin
-    tools          = [pscustomobject]@{ go = $goVersion; node = $nodeVersion; wails = $wailsVersionLine }
+    tools          = [pscustomobject]@{ go = $goVersion; node = $nodeVersion; npm = $npmVersion; wails = $wailsVersionLine }
     artifacts      = $sums
 } | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 (Join-Path $stage "release-manifest.json")
 
