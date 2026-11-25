@@ -90,7 +90,9 @@ export function acceptTransferUpdate(
   if (!current) return next
   if (current.transferID !== next.transferID) return current
   const terminal: TransferState[] = ['COMPLETED', 'FAILED', 'CANCELLED']
-  if (terminal.includes(current.state)) return current
+  // A terminal state cannot change, but native cleanup/partial-output flags
+  // may arrive later as a higher revision of that same terminal state.
+  if (terminal.includes(current.state) && (next.state !== current.state || next.revision === undefined || current.revision === undefined)) return current
   if (current.revision !== undefined && (next.revision ?? 0) <= current.revision) return current
   return next
 }

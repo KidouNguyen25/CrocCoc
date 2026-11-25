@@ -410,3 +410,17 @@ test('canToggleMockMode blocks switching engine while pending or in any running 
     assert.equal(canToggleMockMode(false, state), true)
   }
 })
+
+test('a newer revision of the same terminal state preserves cleanup warnings', async () => {
+  const { createTransferSessionTracker } = await import('./transfer.ts')
+  const tracker = createTransferSessionTracker()
+  tracker.beginStart()
+  tracker.resolveStart('recv-terminal')
+  const failed = { transferID: 'recv-terminal', state: 'FAILED', revision: 4 }
+  assert.deepEqual(tracker.onEvent(failed), failed)
+  const flagged = { ...failed, revision: 5, partialOutput: true, cleanupPending: true }
+  assert.deepEqual(tracker.onEvent(flagged), flagged)
+  assert.equal(tracker.onEvent(failed), undefined)
+  assert.equal(tracker.onEvent({ ...flagged, state: 'COMPLETED', revision: 6 }), undefined)
+  assert.deepEqual(tracker.current(), flagged)
+})
